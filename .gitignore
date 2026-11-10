@@ -1,0 +1,25 @@
+# Local runtime data, protected helper state, credentials and machine snapshots.
+data/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.bak*
+*.log
+*.json
+*.jsonl
+*.yaml
+*.yml
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+*.zip
+*.exe
+*.dll
+outputs/
+work/
+build/
+dist/

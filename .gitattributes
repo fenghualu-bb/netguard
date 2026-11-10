@@ -1,0 +1,6 @@
+* text=auto eol=lf
+# Preserve UTF-8 BOMs and the installed source bytes.
+*.ps1 -text
+*.py -text
+*.pyw -text
+*.cs -text
