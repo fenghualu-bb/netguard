@@ -138,7 +138,17 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 - **虚拟机的共享网络（vmnet NAT）**经过转发的流量不带 TUN 源地址，断网保护开启时会被拦截（不会泄露，只是不通）。Docker Desktop 和 Parallels 的用户态网络不受影响。
 - 开启 macOS 的**互联网共享**会替换 `com.apple/*` 锚点，断网规则因此失效。NetGuard 会把这种情况报为高危异常并锁定，但不会去改主规则集。
 - FlClash 内核的 DIRECT 流量（例如国内直连规则）仍然走真实 IP，这一点和 Windows 一样。只有发往 Anthropic 官方网段的流量被硬拦截；claude.ai 走 Cloudflare 的那部分只能靠出口检查发现。
-- 基于 UDP 的代理协议（Hysteria2、TUIC 等），内核套接字的身份识别结果见 CI 报告。如果识别失败，`enable` 的自检会因为“代理出口不可用”而自动回滚，不会断网。
+- 基于 UDP 的代理协议（Hysteria2、TUIC 等）：CI 在真实 macOS 15.8 上验证过，代理内核的已连接和未连接 UDP 套接字都能被识别并放行。以后的 macOS 版本如果改变这一行为，`enable` 的自检会因为“代理出口不可用”而自动回滚，不会断网。
+
+## CI 实测结果（2026-11-11，GitHub Actions macos-15-arm64，macOS 15.8.2）
+
+57 项全部通过，0 项失败，0 项警告。验证内容：
+- 普通用户直连、root 后台程序直连：都被拦截；
+- 代理内核（setuid root + 用户组）的 TCP、已连接 UDP、未连接 UDP：都被放行；
+- 代理内核直连 Anthropic 网段：被拦截；
+- 回环、局域网网关、TUN 源地址：都被放行；
+- 没有 FlClash 时拒绝开启；enable 中途被杀后，后台自动回滚；模拟重启后，规则在 Python 启动前就重新加载；紧急恢复、卸载都正常；
+- 运行前后 `/etc/pf.conf`、`/etc/hosts`、pf 主规则集和 pf 启用状态完全一致。
 
 ## 配置 `/Library/NetGuard/config.json`
 
