@@ -1,5 +1,7 @@
 # NetGuard repository maintenance
 
+On a Mac, the macOS port lives in `macos/`; follow `macos/AGENTS.md` instead of the Windows rules below.
+
 ## Scope
 
 This repository is a sanitized Windows source snapshot. Read README.md and docs/OPERATIONS.md before modifying deployment or protection behavior. Repository tests use fixtures; they do not prove the current machine is protected.

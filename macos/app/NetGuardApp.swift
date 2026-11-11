@@ -551,7 +551,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(withTitle: "开启断网保护…", action: #selector(enable), keyEquivalent: "").target = self
         }
         if s?.guardInfo?.lockdown == true {
-            menu.addItem(withTitle: "解除锁定…", action: #selector(release), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "解除锁定…", action: #selector(releaseLockdown), keyEquivalent: "").target = self
         }
         menu.addItem(withTitle: "立即完整检查…", action: #selector(refreshNow), keyEquivalent: "r").target = self
         menu.addItem(.separator())
@@ -583,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             model.admin(["disable"])
         }
     }
-    @objc func release() { model.admin(["release"]) }
+    @objc func releaseLockdown() { model.admin(["release"]) }
     @objc func refreshNow() { model.admin(["refresh"]) }
     @objc func recover() {
         if confirm("执行紧急恢复？", "会移除 NetGuard 的全部 pf 规则并关闭断网保护。") {
