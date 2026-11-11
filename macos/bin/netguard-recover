@@ -17,7 +17,7 @@ fi
 echo "1/4 停止 NetGuard 后台（避免它在恢复过程中重新加载规则）……"
 /bin/launchctl bootout system/$LABEL 2>/dev/null || true
 
-echo "2/4 移除 NetGuard 的 pf 规则（只清它自己的锚点 $ANCHOR）……"
+echo "2/4 移除 NetGuard 的 pf 规则（只清它自己的锚点 ${ANCHOR}）……"
 /sbin/pfctl -a "$ANCHOR" -F rules 2>/dev/null || true
 token=$(/bin/cat "$ROOT/pf-token" 2>/dev/null)
 if [ -n "$token" ]; then

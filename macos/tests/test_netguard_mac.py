@@ -554,6 +554,14 @@ class SafetyStaticTests(unittest.TestCase):
             result = subprocess.run([bash, "-n", path], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, rel + ": " + result.stderr)
 
+    def test_shell_variables_braced_before_non_ascii(self):
+        # macOS /bin/bash 3.2 reads UTF-8 bytes after `$NAME` as part of the name (set -u aborts).
+        pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
+        for rel in ("install.sh", "uninstall.sh", "bin/netguard", "bin/netguard-boot", "bin/netguard-recover",
+                    "scripts/recover.command", "ci/integration.sh"):
+            with open(os.path.join(MACOS, rel), encoding="utf-8") as stream:
+                self.assertEqual(pat.findall(stream.read()), [], rel)
+
     def test_python39_compatible_syntax(self):
         import ast
         for base, _d, names in os.walk(os.path.join(MACOS, "netguard")):

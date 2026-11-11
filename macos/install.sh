@@ -66,7 +66,7 @@ if [ -d "$ROOT/lib" ]; then
     say "旧版本已备份到 $ROOT/backup-$STAMP"
 fi
 
-say "安装文件到 $ROOT（root 所有，普通用户只读）"
+say "安装文件到 ${ROOT}（root 所有，普通用户只读）"
 install -d -o root -g wheel -m 755 "$ROOT" "$ROOT/lib" "$ROOT/bin"
 rm -rf "$ROOT/lib/netguard"
 cp -R "$SRC/netguard" "$ROOT/lib/netguard"
@@ -85,7 +85,7 @@ chown root:wheel "$ROOT/events.jsonl" "$ROOT/netguard.log"; chmod 644 "$ROOT/eve
 
 NETGUARD_INSTALL_USER="$USER_NAME" "$ROOT/bin/netguard" init-config
 
-say "注册后台 $LABEL（开机自启，每 10 秒检查一次）"
+say "注册后台 ${LABEL}（开机自启，每 10 秒检查一次）"
 install -o root -g wheel -m 644 "$SRC/launchd/$LABEL.plist" "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap system "$PLIST"

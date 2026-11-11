@@ -58,7 +58,7 @@ PF_CONF_BEFORE=$(shasum -a 256 /etc/pf.conf | cut -d' ' -f1)
 HOSTS_BEFORE=$(shasum -a 256 /etc/hosts | cut -d' ' -f1)
 MAIN_BEFORE=$(/sbin/pfctl -sr 2>/dev/null)
 PFSTATUS_BEFORE=$(/sbin/pfctl -s info 2>/dev/null | awk '/^Status:/ { print $2 }')
-echo "pf 状态：$PFSTATUS_BEFORE；macOS $(sw_vers -productVersion) $(uname -m)；runner=$RUNNER gid=$(id -g "$RUNNER")"
+echo "pf 状态：${PFSTATUS_BEFORE}；macOS $(sw_vers -productVersion) $(uname -m)；runner=$RUNNER gid=$(id -g "$RUNNER")"
 echo "主规则集："; printf '%s\n' "$MAIN_BEFORE" | sed 's/^/    /'
 check "安装前网络可用" net_ok
 
@@ -119,16 +119,16 @@ probe_case() {  # probe_case <desc> <expect OK|FAIL> <label-that-must-grow> <run
     esac
     after=$(labels)
     d=$(delta "$before" "$after" "$label")
-    echo "    [$who] prober $* -> $res；$label +$d"
+    echo "    [$who] prober $* -> ${res}；$label +$d"
     if [ "$expect" != "-" ]; then
         case "$res" in
-            OK*) [ "$expect" = "OK" ] && ok "$desc：连接结果 OK" || bad "$desc：应被拦截却连上了" ;;
-            *)   [ "$expect" = "FAIL" ] && ok "$desc：连接被拦截" || bad "$desc：应放行却失败（$res）" ;;
+            OK*) [ "$expect" = "OK" ] && ok "${desc}：连接结果 OK" || bad "${desc}：应被拦截却连上了" ;;
+            *)   [ "$expect" = "FAIL" ] && ok "${desc}：连接被拦截" || bad "${desc}：应放行却失败（${res}）" ;;
         esac
     fi
     if [ -n "$L0" ]; then
-        if [ "$d" -gt 0 ]; then ok "$desc：命中规则 $label"; else
-            if [ "$expect" = "-" ]; then warn "$desc：未命中 $label"; else bad "$desc：未命中规则 $label"; fi
+        if [ "$d" -gt 0 ]; then ok "${desc}：命中规则 $label"; else
+            if [ "$expect" = "-" ]; then warn "${desc}：未命中 $label"; else bad "${desc}：未命中规则 $label"; fi
         fi
     fi
 }
@@ -214,7 +214,7 @@ section "8. 全局不变量"
 check "/etc/pf.conf 未改动" [ "$(shasum -a 256 /etc/pf.conf | cut -d' ' -f1)" = "$PF_CONF_BEFORE" ]
 check "/etc/hosts 未改动" [ "$(shasum -a 256 /etc/hosts | cut -d' ' -f1)" = "$HOSTS_BEFORE" ]
 check "pf 主规则集未改动" [ "$(/sbin/pfctl -sr 2>/dev/null)" = "$MAIN_BEFORE" ]
-check "pf 启用状态恢复为安装前（$PFSTATUS_BEFORE）" \
+check "pf 启用状态恢复为安装前（${PFSTATUS_BEFORE}）" \
     [ "$(/sbin/pfctl -s info 2>/dev/null | awk '/^Status:/ { print $2 }')" = "$PFSTATUS_BEFORE" ]
 check "结束时网络可用" net_ok
 
