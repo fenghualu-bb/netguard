@@ -183,3 +183,41 @@ extension GuardTests {
         XCTAssertNil(PacketParser.parse(Data(malformed)))
     }
 }
+
+extension GuardTests {
+    func testAcceptanceTransportWorksWithoutReceiptOrExitObservationsWhileProtectedAppStaysLocked() {
+        var e = evidence
+        e.realMachineValidationPassed = false; e.ordinaryExitIP = nil; e.claudeExitIP = nil
+        e.tunInterface = nil; e.tunInterfaceIndex = nil; e.tunOwnershipVerified = false
+        let permit = TransportPermit(sourceAddress: internet.sourceAddress, sourcePort: 42000, destinationAddress: internet.destinationAddress, destinationPort: 443, ipProtocol: 6, expiresAt: now + 1)
+        let s = snapshot(e, permits: [permit])
+        XCTAssertEqual(s.phase, .unverified)
+        XCTAssertTrue(s.lockdown)
+        XCTAssertTrue(FlowPolicy.shouldAllow(identity: proxy, snapshot: s, now: now))
+        XCTAssertFalse(FlowPolicy.shouldAllow(identity: app, snapshot: s, now: now))
+        XCTAssertEqual(PacketPolicy.evaluate(packet: internet, interface: physical, snapshot: s, now: now).verdict, .allow)
+        var unpermitted = internet; unpermitted.destinationPort = 444
+        XCTAssertEqual(PacketPolicy.evaluate(packet: unpermitted, interface: physical, snapshot: s, now: now).verdict, .drop)
+        let dns = PacketDescriptor(sourceAddress: internet.sourceAddress, destinationAddress: "192.168.1.1", ipProtocol: 17, sourcePort: 42000, destinationPort: 53)
+        XCTAssertEqual(PacketPolicy.evaluate(packet: dns, interface: physical, snapshot: s, now: now).verdict, .drop)
+    }
+    func testAcceptanceResolverUsesOnlyExactVerifiedTUNWithoutReceiptOrDualExits() {
+        var e = evidence; e.realMachineValidationPassed = false; e.ordinaryExitIP = nil; e.claudeExitIP = nil
+        let s = snapshot(e)
+        let resolver = ApplicationIdentity(signingIdentifier: "test.resolver", teamID: "TESTSYSTEM", verified: true)
+        XCTAssertTrue(FlowPolicy.shouldAllow(identity: resolver, snapshot: s, now: now))
+        XCTAssertFalse(FlowPolicy.shouldAllow(identity: app, snapshot: s, now: now))
+        XCTAssertEqual(PacketPolicy.evaluate(packet: internet, interface: .init(name: "utun7", index: 17), snapshot: s, now: now).verdict, .allow)
+        XCTAssertEqual(PacketPolicy.evaluate(packet: internet, interface: .init(name: "utun8", index: 18), snapshot: s, now: now).verdict, .drop)
+        XCTAssertEqual(PacketPolicy.evaluate(packet: internet, interface: physical, snapshot: s, now: now).verdict, .drop)
+        e.tunOwnershipVerified = false
+        XCTAssertFalse(FlowPolicy.shouldAllow(identity: resolver, snapshot: snapshot(e), now: now))
+    }
+    func testAcceptancePhysicalTupleStillRequiresEveryOperationalAttestation() {
+        let permit = TransportPermit(sourceAddress: internet.sourceAddress, sourcePort: 42000, destinationAddress: internet.destinationAddress, destinationPort: 443, ipProtocol: 6, expiresAt: now + 1)
+        for field in [\RuntimeEvidence.proxyIdentityVerified, \.socketFilterVerified, \.packetFilterVerified, \.helperVerified, \.signingVerified] {
+            var e = evidence; e.realMachineValidationPassed = false; e[keyPath: field] = false
+            XCTAssertEqual(PacketPolicy.evaluate(packet: internet, interface: physical, snapshot: snapshot(e, permits: [permit]), now: now).verdict, .drop)
+        }
+    }
+}
