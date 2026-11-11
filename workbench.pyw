@@ -37,7 +37,7 @@ NO_WINDOW = 0x08000000
 CHECK_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 CLAUDE_URL = "https://claude.ai/cdn-cgi/trace"
 
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 LOADED_SOURCE_HASH = hashlib.sha256(Path(__file__).read_bytes()).digest()
 
 # 深色监控台配色
@@ -318,12 +318,12 @@ EVENT_TYPES = {
     "isolation_sync": ("隔离已同步", WARN), "isolation_sync_failed": ("隔离同步失败", BAD),
     "trigger": ("锁定隔离", BAD), "release": ("解除锁定", GOOD), "release_refused": ("解除被拒", WARN),
     "suspect": ("发现异常", WARN), "recovered": ("自行恢复", INFO), "info": ("信息", INFO),
-    "config": ("设置变更", ACCENT), "guard_error": ("检查出错", BAD),
+    "config": ("设置变更", ACCENT), "guard_error": ("检查出错", BAD), "grace": ("宽限暂缓", INFO),
     "kill": ("结束 Claude", BAD), "net_block": ("切断网络", WARN), "net_restore": ("恢复网络", GOOD),
     "isolate": ("隔离 Claude", WARN), "unisolate": ("解除隔离", GOOD),
 }
 # 「保护动作」：任何一次切断网络、结束进程、隔离、锁定 / 解除都算；默认只看这些
-KEY_EVENTS = {"isolation_sync", "isolation_sync_failed", "trigger", "release", "release_refused", "guard_error", "config", "kill", "net_block", "isolate", "unisolate"}
+KEY_EVENTS = {"grace", "isolation_sync", "isolation_sync_failed", "trigger", "release", "release_refused", "guard_error", "config", "kill", "net_block", "isolate", "unisolate"}
 SEVERITY_COLOR = {"高": BAD, "中": WARN, "低": INFO}
 GUARD_EVENTS = GUARD / "data" / "protection-events.jsonl"
 
@@ -408,6 +408,10 @@ def guard_view(s):
         problems.append("自动防护检查停滞")
     elif g.get("bad_streak"):
         rows["ag_state"] = (f"发现异常，确认中 {g.get('bad_streak')}/{g.get('confirm', 2)}", WARN)
+    elif float(g.get("grace_until") or 0) > time.time():
+        left = int(float(g["grace_until"]) - time.time())
+        # 开机 / 唤醒后代理还在启动属于正常，不算问题；高危异常在宽限期内照样锁定
+        rows["ag_state"] = (f"开机 / 唤醒宽限期（约 {left} 秒）：代理未就绪不锁定，高危异常照常锁定", GOOD if not g.get("last_findings") else WARN)
     else:
         rows["ag_state"] = (f"待命：每 {g.get('interval', 10)} 秒检查，连续 {g.get('confirm', 2)} 次异常即隔离 Claude", GOOD)
     rows["ag_check"] = (time.strftime("%H:%M:%S", time.localtime(last)) if last else "尚未检查", BAD if stale else INFO)

@@ -7,6 +7,9 @@ foreach($name in @('Get-RuleHealth','Sync-LockedIsolation','Invoke-GuardTick')){
     $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     if($node){Invoke-Expression $node.Extent.Text}
 }
+# v1.3.5：宽限期由 test_admin.ps1 覆盖；这里固定为不在宽限期，隔离同步行为不变
+function Get-GraceInfo { [pscustomobject]@{ active=$false; until=0; anchor=0; reason='测试' } }
+$RiskInfo=@{}
 # Replace only the native WFP boundary. No real engine is opened and no process is stopped.
 Add-Type -TypeDefinition @'
 using System;using System.Collections.Generic;

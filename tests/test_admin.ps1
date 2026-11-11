@@ -23,6 +23,9 @@ function Log([string]$Text){}
 # Reconciliation itself is exercised by test_isolation_sync.ps1 with the real implementation.
 function Sync-LockedIsolation($State,$Guard){return $false}
 function Get-RequiredClaudePrograms{return @('C:\Fixture\Desktop\claude.exe','C:\Fixture\CLI\claude.exe')}
+# 宽限期替身：默认不在宽限期（旧测试行为不变）；$script:GraceActive=$true 模拟开机 / 唤醒后
+$script:GraceActive=$false; $script:GraceAnchor=1000
+function Get-GraceInfo { [pscustomobject]@{ active=$script:GraceActive; until=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()+120; anchor=$script:GraceAnchor; reason='测试' } }
 $full=@('NetGuard permit TUN v4','NetGuard permit proxy app C:\Proxy\FlClashCore.exe','NetGuard permit proxy app C:\Proxy\FlClash.exe','NetGuard block DNS outside TUN v4','NetGuard permit loopback v4','NetGuard permit LAN/link-local v4','NetGuard block all other v4','NetGuard permit TUN v6','NetGuard permit proxy app C:\Proxy\FlClashCore.exe','NetGuard permit proxy app C:\Proxy\FlClash.exe','NetGuard block DNS outside TUN v6','NetGuard permit loopback v6','NetGuard permit LAN/link-local v6','NetGuard block all other v6')
 $failures=@()
 $tagged=@('v4|NetGuard permit TUN v4','v4|NetGuard permit proxy app C:\Proxy\FlClashCore.exe','v4|NetGuard permit proxy app C:\Proxy\FlClash.exe','v4|NetGuard block DNS outside TUN v4','v4|NetGuard permit loopback v4','v4|NetGuard permit LAN/link-local v4','v4|NetGuard block all other v4','v6|NetGuard permit TUN v6','v6|NetGuard permit proxy app C:\Proxy\FlClashCore.exe','v6|NetGuard permit proxy app C:\Proxy\FlClash.exe','v6|NetGuard block DNS outside TUN v6','v6|NetGuard permit loopback v6','v6|NetGuard permit LAN/link-local v6','v6|NetGuard block all other v6')
@@ -112,6 +115,28 @@ Expect ($failedRelease -and (Read-Guard).lockdown -eq $true -and (Events)[-1].ty
 $script:Findings = @(); $script:NothingToRelease = $false
 Invoke-Expression $switch.Extent.Text
 Expect ((Read-Guard).lockdown -eq $false -and (Read-State).claude_block -eq $false -and $script:ApplyLog[-1] -eq $false -and (Events)[-1].type -eq 'release') 'release: clean checks unlock and lift isolation'
+# ---------------- v1.3.5 开机 / 唤醒宽限期
+$boot = @([pscustomobject]@{ key='core'; text='FlClash 内核未运行' }, [pscustomobject]@{ key='tun'; text='TUN 虚拟网卡未连接' }, [pscustomobject]@{ key='guard_daemon'; text='ClaudeGuard 守护进程未运行' })
+Reset; $script:GraceActive=$true; $script:GraceAnchor=1000; $script:Findings=$boot
+Invoke-GuardTick; Invoke-GuardTick; Invoke-GuardTick
+$ev=@(Events)
+Expect ((Read-Guard).lockdown -eq $false -and $script:Kills -eq 0 -and (Read-Guard).bad_streak -eq 0) 'grace: boot-time medium findings never lock (the 6 false lockdowns)'
+Expect ($ev.Count -eq 1 -and $ev[0].type -eq 'grace' -and $ev[0].severity -eq '中' -and @($ev[0].reasons).Count -eq 3) 'grace: deferral recorded once per grace window with reasons'
+Expect ((Read-Guard).grace_until -gt 0 -and @((Read-Guard).last_findings).Count -eq 3) 'grace: status still shows the current findings and grace end'
+Reset; $script:GraceActive=$true; $script:Findings=@($boot + $bad); Invoke-GuardTick; Invoke-GuardTick
+$tr=@(Events | Where-Object { $_.type -eq 'trigger' })
+Expect ((Read-Guard).lockdown -eq $true -and $script:Kills -eq 1 -and $tr.Count -eq 1 -and @($tr[0].reasons).Count -eq 1 -and @($tr[0].reasons)[0].code -eq 'egress') 'grace: high-risk finding still locks inside grace (reasons = high only)'
+Reset; $script:GraceActive=$true; $script:Findings=@([pscustomobject]@{ key='claude_path'; text='Claude 已更新到 9.9，ClaudeGuard 保护的仍是旧路径' }); Invoke-GuardTick; Invoke-GuardTick
+Expect ((Read-Guard).lockdown -eq $true) 'grace: Claude path change still locks inside grace'
+Reset; $script:GraceActive=$true; $script:Findings=@([pscustomobject]@{ key='unknown_new_check'; text='新类型异常' }); Invoke-GuardTick; Invoke-GuardTick
+Expect ((Read-Guard).lockdown -eq $true) 'grace: unregistered finding types are not deferred (fail closed)'
+Reset; $script:GraceActive=$true; $script:Findings=$boot; Invoke-GuardTick; $script:GraceActive=$false; Invoke-GuardTick
+Expect ((Read-Guard).lockdown -eq $false -and (Read-Guard).bad_streak -eq 1 -and (Events)[-1].type -eq 'suspect') 'grace: after grace ends, still-missing proxy starts normal confirmation'
+Invoke-GuardTick
+Expect ((Read-Guard).lockdown -eq $true -and (Read-Guard).grace_until -eq 0) 'grace: proxy still down after grace -> locks as before'
+Reset; $script:GraceActive=$true; $script:GraceAnchor=1000; $script:Findings=$boot; Invoke-GuardTick; $script:GraceAnchor=2000; Invoke-GuardTick
+Expect (@(Events | Where-Object { $_.type -eq 'grace' }).Count -eq 2) 'grace: a new wake/logon window is recorded again'
+$script:GraceActive=$false
 $resolvedCleanup=(Resolve-Path -LiteralPath $tmp).ProviderPath
 $allowedCleanupBase=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')+'\'
 if(-not $resolvedCleanup.StartsWith($allowedCleanupBase,[StringComparison]::OrdinalIgnoreCase)){throw 'Cleanup outside test temp directory'}

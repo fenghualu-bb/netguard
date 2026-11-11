@@ -203,6 +203,20 @@ class GuardViewTests(unittest.TestCase):
         view=self.render(lambda s: self.g(s,bad_streak=1,last_findings=['TUN 虚拟网卡未连接']))
         self.assertEqual(view.values['ag_state'][1],wb.WARN)
 
+    def test_grace_window_is_shown_and_not_a_problem(self):
+        view=self.render(lambda s: self.g(s,grace_until=time.time()+120))
+        self.assertIn('宽限期',view.values['ag_state'][0])
+        self.assertEqual(view.values['ag_state'][1],wb.GOOD)
+        self.assertEqual(view.verdict.values['foreground'],wb.GOOD)
+
+    def test_expired_grace_falls_back_to_standby(self):
+        view=self.render(lambda s: self.g(s,grace_until=time.time()-5))
+        self.assertIn('待命',view.values['ag_state'][0])
+
+    def test_grace_event_type_is_labelled_and_key(self):
+        self.assertEqual(wb.EVENT_TYPES['grace'][0],'宽限暂缓')
+        self.assertIn('grace',wb.KEY_EVENTS)
+
 
 class EventsTests(unittest.TestCase):
     def test_read_events_skips_garbage_and_limits(self):

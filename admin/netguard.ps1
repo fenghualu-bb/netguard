@@ -196,6 +196,24 @@ function Get-StrictRouteRuntime {
 # 动作：WFP 隔离 Claude 程序 + 结束 Claude 进程。解除只能手动（release），且解除前会重新检查。
 $GuardConfirm = 2
 $GuardInterval = 10
+# 开机 / 登录 / 睡眠唤醒宽限期（v1.3.5）：这几分钟里 FlClash、TUN、ClaudeGuard 还没起来属于正常现象。
+# 宽限期内只有「高」危异常（出口不在白名单、断网规则不全、隔离不全、Claude 路径过期）才会计数并锁定；
+# 「中」危异常（内核 / TUN / 守护 / 助手未就绪）只记录一次、不锁定。此时断网保护规则已在生效，真实 IP 出不去。
+$GraceSeconds = 180
+$script:ResumeAt = 0      # watch 循环检测到时间跳变（睡眠唤醒）时写入
+
+# 宽限期起点 = 开机、当前用户登录（最早的 explorer 进程）、上次唤醒 三者中最晚的一个。
+# 没有任何用户登录时（停在登录界面）始终处于宽限期：此时不可能有 Claude 在运行。
+function Get-GraceInfo {
+    $Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $Anchors = @([double]$script:ResumeAt)
+    try { $Anchors += ([DateTimeOffset](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUnixTimeSeconds() } catch {}
+    $Explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | ForEach-Object { try { $_.StartTime } catch { $null } } | Where-Object { $_ })
+    if (-not $Explorer.Count) { return [pscustomobject]@{ active = $true; until = $Now + $GraceSeconds; anchor = $Now; reason = '尚无用户登录' } }
+    $Anchors += ([DateTimeOffset](($Explorer | Sort-Object | Select-Object -First 1))).ToUnixTimeSeconds()
+    $Anchor = ($Anchors | Measure-Object -Maximum).Maximum
+    return [pscustomobject]@{ active = ($Now - $Anchor) -lt $GraceSeconds; until = $Anchor + $GraceSeconds; anchor = $Anchor; reason = '开机 / 登录 / 唤醒' }
+}
 
 # 每类原因的危险程度与说明（保护记录里逐条显示）
 $RiskInfo = @{
@@ -233,7 +251,7 @@ function Read-Guard {
     $G = $null
     if (Test-Path -LiteralPath $GuardFile) { try { $G = Get-Content -LiteralPath $GuardFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch {} }
     if (-not $G) { $G = [pscustomobject]@{} }
-    foreach ($Default in @(@('enabled', $true), @('lockdown', $false), @('since', 0), @('reasons', @()), @('bad_streak', 0), @('last_check', 0), @('last_findings', @()), @('triggers', 0), @('sync_error', $null))) {
+    foreach ($Default in @(@('enabled', $true), @('lockdown', $false), @('since', 0), @('reasons', @()), @('bad_streak', 0), @('last_check', 0), @('last_findings', @()), @('triggers', 0), @('sync_error', $null), @('grace_until', 0), @('grace_noted', 0))) {
         if (-not ($G.PSObject.Properties.Name -contains $Default[0])) { $G | Add-Member -NotePropertyName $Default[0] -NotePropertyValue $Default[1] }
     }
     return $G
@@ -336,8 +354,20 @@ function Invoke-GuardTick {
         if ($SyncFailure) { $Findings += [pscustomobject]@{ key='isolation'; text=$SyncFailure } }
         $G.last_check = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $G.last_findings = @($Findings | ForEach-Object { $_.text })
+        $Grace = Get-GraceInfo
+        $G | Add-Member -NotePropertyName grace_until -NotePropertyValue $(if ($Grace.active) { $Grace.until } else { 0 }) -Force
         if (-not $G.enabled) { $G.bad_streak = 0; Write-Json $GuardFile $G; return }
         if ($G.lockdown) { Write-Json $GuardFile $G; return }   # 已锁定，等待手动解除
+        if ($Grace.active) {
+            # 只放过明确登记为「中 / 低」的异常；未登记的类型一律照常计数（宁可多锁，不可漏锁）
+            $Deferred = @($Findings | Where-Object { $Info = $RiskInfo[[string]$_.key]; $Info -and $Info[0] -ne '高' })
+            if ($Deferred.Count -and [double]$G.grace_noted -ne [double]$Grace.anchor) {
+                $Left = [int]($Grace.until - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+                Add-Event 'grace' "宽限期内（$($Grace.reason)，还剩约 $Left 秒）：中危异常暂不锁定，高危异常照常锁定" $Deferred
+                $G | Add-Member -NotePropertyName grace_noted -NotePropertyValue $Grace.anchor -Force
+            }
+            $Findings = @($Findings | Where-Object { $_ -notin $Deferred })
+        }
         if ($Findings.Count -eq 0) {
             if ($G.bad_streak -gt 0) { Add-Event 'recovered' '异常在确认前已恢复，未触发保护' @() }
             $G.bad_streak = 0; Write-Json $GuardFile $G; return
@@ -374,7 +404,7 @@ function Write-Status {
         strict_route_runtime = $Strict
         guard = [ordered]@{ enabled = [bool]$G.enabled; lockdown = [bool]$G.lockdown; since = $G.since; reasons = @($G.reasons)
                             bad_streak = $G.bad_streak; confirm = $GuardConfirm; interval = $GuardInterval; last_check = $G.last_check
-                            last_findings = @($G.last_findings); triggers = $G.triggers }
+                            last_findings = @($G.last_findings); triggers = $G.triggers; grace_until = $G.grace_until }
         base_filter_count=$Health.base_filter_count; expected_base_filter_count=$Health.expected_base_filter_count
         required_claude_filter_count=$Health.required_claude_filter_count; covered_claude_filter_count=$Health.covered_claude_filter_count
         extra_claude_filter_count=$Health.extra_claude_filter_count
@@ -444,8 +474,12 @@ try {
             # 常驻循环：每 $GuardInterval 秒检查一次，不主动退出（v1.3.2）。
             # 旧做法“每分钟启动、跑 55 秒退出”因启动耗时超过 60 秒，每隔一分钟就漏掉一次启动，出现约 1 分钟的检查断档。
             # 计划任务的“每分钟触发 + IgnoreNew”现在只充当看门狗：循环在跑时触发被忽略，循环意外退出时 1 分钟内重新拉起。
+            $PrevTick = $null
             while ($true) {
                 $TickStart = Get-Date
+                # 两次检查之间实际间隔远超节拍，说明系统刚从睡眠 / 休眠唤醒：重新开始宽限期
+                if ($PrevTick -and ($TickStart - $PrevTick).TotalSeconds -gt 60) { $script:ResumeAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+                $PrevTick = $TickStart
                 try { Invoke-GuardTick } catch { Log ('自动防护检查出错：' + $_.Exception.Message); try { Add-Event 'guard_error' ('自动防护检查出错：' + $_.Exception.Message) @([pscustomobject]@{ key = 'error'; text = $_.Exception.Message }) } catch {} }
                 try { Write-Status } catch { Log ('写状态出错：' + $_.Exception.Message) }
                 # 按固定节拍睡眠：扣掉本轮检查耗时，保持约 10 秒一次

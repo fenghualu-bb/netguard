@@ -1,6 +1,6 @@
 # NetGuard
 
-Windows 11 上用于 Claude 网络环境的本地工作台与 WFP 断网保护。当前源码版本 **1.3.4**。
+Windows 11 上用于 Claude 网络环境的本地工作台与 WFP 断网保护。当前源码版本 **1.3.5**。
 
 这是一套已有本机部署的源码备份，依赖另行安装的 [ClaudeGuard](https://github.com/ivblz/ClaudeGuard) 和 [FlClash](https://github.com/chen08209/FlClash)，不是独立的一键安装包。
 
