@@ -1,0 +1,36 @@
+name: macOS source and unsigned build
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/macos-guard]
+    paths: ['macos/**', '.github/workflows/macos-ci.yml']
+permissions:
+  contents: read
+concurrency:
+  group: macos-source-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compiler environment
+        run: |
+          uname -m
+          xcodebuild -version
+          swift --version
+      - name: Metadata regression
+        run: python3 -m unittest discover -s macos/tests -p 'test_*.py'
+      - name: Core tests
+        run: swift test --package-path macos/NetGuardCore
+      - name: Unsigned SDK build
+        run: bash macos/scripts/build.sh
+      - name: Package candidate (never installed or activated)
+        run: ditto -c -k --keepParent macos/build/NetGuard.app macos/build/NetGuard-macos-arm64-UNSIGNED.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: NetGuard-macos-arm64-UNSIGNED
+          path: macos/build/NetGuard-macos-arm64-UNSIGNED.zip
+          if-no-files-found: error
+          retention-days: 7

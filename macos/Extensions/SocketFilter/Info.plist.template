@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.netguard.macos.socket</string>
+<key>CFBundleName</key><string>NetGuard Socket Filter</string>
+<key>CFBundleExecutable</key><string>NetGuardSocketFilter</string>
+<key>CFBundlePackageType</key><string>SYSX</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>NetworkExtension</key><dict>
+<key>NEMachServiceName</key><string>$(APP_GROUP_ID).socket</string>
+<key>NEProviderClasses</key><dict>
+<key>com.apple.networkextension.filter-data</key><string>$(PRODUCT_MODULE_NAME).SocketFilterProvider</string>
+</dict></dict>
+</dict></plist>

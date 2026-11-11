@@ -23,3 +23,10 @@ outputs/
 work/
 build/
 dist/
+macos/NetGuardCore/.build/
+.swiftpm/
+*.provisionprofile
+*.mobileprovision
+*.cer
+*.p8
+!.github/workflows/macos-ci.yml
