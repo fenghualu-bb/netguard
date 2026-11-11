@@ -34,8 +34,13 @@ warn() { printf '\033[33m警告：%s\033[0m\n' "$*"; }
 die() { printf '\033[31m失败：%s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 sudo 运行：sudo bash macos/install.sh"
+# sudo sets SUDO_USER; the macOS admin dialog (osascript "with administrator privileges")
+# does not, so fall back to the user logged in at the console.
 USER_NAME="${SUDO_USER:-}"
-[ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] || die "请在你自己的账户里用 sudo 运行（安装程序需要知道桌面用户）"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    USER_NAME="$(stat -f %Su /dev/console)"
+fi
+[ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] || die "找不到桌面用户：请登录后在自己的账户里运行"
 USER_UID="$(id -u "$USER_NAME")"
 USER_HOME="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory | awk '{print $2}')"
 [ -d "$USER_HOME" ] || die "找不到用户目录 $USER_HOME"

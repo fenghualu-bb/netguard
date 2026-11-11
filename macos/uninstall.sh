@@ -13,6 +13,9 @@ PURGE=0
 
 [ "$(id -u)" -eq 0 ] || { echo "请用 sudo 运行"; exit 2; }
 USER_NAME="${SUDO_USER:-}"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    USER_NAME="$(stat -f %Su /dev/console)"
+fi
 
 echo "==> 移除断网规则并停止后台"
 if [ -x "$ROOT/bin/netguard-recover" ]; then

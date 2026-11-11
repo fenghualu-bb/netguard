@@ -74,6 +74,11 @@ check "安装没有加载任何断网规则" anchor_empty
 check "安装后网络可用" net_ok
 check "代码目录 root 所有、他人不可写" bash -c "[ \"\$(stat -f '%Su %Sp' $ROOT/lib/netguard/service.py)\" = 'root -rw-r--r--' ]"
 check "普通用户能读 status" sudo -u "$RUNNER" /Library/NetGuard/bin/netguard status
+echo "  -- 以管理员密码框方式（无 SUDO_USER）再次运行安装＝升级路径"
+if env -u SUDO_USER bash "$MACOS/install.sh" --ci >/tmp/ngci-reinstall.log 2>&1; then ok "无 SUDO_USER 时安装/升级成功"; else bad "无 SUDO_USER 时安装失败"; tail -n 20 /tmp/ngci-reinstall.log; fi
+check "升级后保留备份" bash -c "ls -d $ROOT/backup-* >/dev/null 2>&1"
+check "升级没有加载断网规则" anchor_empty
+check "菜单栏 LaunchAgent 属于桌面用户" bash -c "[ \"\$(stat -f %Su /Users/$RUNNER/Library/LaunchAgents/com.netguard.menu.plist)\" = '$RUNNER' ]"
 
 # ------------------------------------------------------------------------------
 section "2. 没有 FlClash 时必须拒绝开启（防止断网的关键）"
