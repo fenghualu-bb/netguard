@@ -1,0 +1,9 @@
+#!/bin/sh
+# NetGuard for macOS command line (installed root-owned at /Library/NetGuard/bin/netguard).
+# Always call this absolute path with sudo; never a copy in a user-writable directory.
+ROOT=/Library/NetGuard
+PY=$(/bin/cat "$ROOT/python-path" 2>/dev/null)
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+    PY=/usr/bin/python3
+fi
+exec "$PY" -I -B "$ROOT/lib/netguard_main.py" "$@"

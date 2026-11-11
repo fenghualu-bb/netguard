@@ -1,0 +1,63 @@
+#!/bin/sh
+# NetGuard emergency recovery. Needs no network and no Python: only pfctl/launchctl.
+#   sudo /Library/NetGuard/bin/netguard-recover          remove rules, turn the kill switch off
+#   sudo /Library/NetGuard/bin/netguard-recover --stop   ...and keep the NetGuard daemon stopped
+# It touches only NetGuard's own anchor and pf reference. It never runs `pfctl -d`,
+# never edits /etc/pf.conf, /etc/hosts, DNS or routes.
+ROOT=/Library/NetGuard
+ANCHOR='com.apple/zz.NetGuard'
+LABEL=com.netguard.daemon
+PLIST=/Library/LaunchDaemons/$LABEL.plist
+
+if [ "$(/usr/bin/id -u)" != "0" ]; then
+    echo "需要管理员权限，请运行：sudo $0 $*"
+    exit 2
+fi
+
+echo "1/4 停止 NetGuard 后台（避免它在恢复过程中重新加载规则）……"
+/bin/launchctl bootout system/$LABEL 2>/dev/null || true
+
+echo "2/4 移除 NetGuard 的 pf 规则（只清它自己的锚点 $ANCHOR）……"
+/sbin/pfctl -a "$ANCHOR" -F rules 2>/dev/null || true
+token=$(/bin/cat "$ROOT/pf-token" 2>/dev/null)
+if [ -n "$token" ]; then
+    /sbin/pfctl -X "$token" >/dev/null 2>&1 || true
+fi
+/bin/rm -f "$ROOT/pf-token" "$ROOT/anchor.rules"
+
+echo "3/4 记录：断网保护已关闭、Claude 隔离与锁定已解除……"
+if [ -d "$ROOT" ]; then
+    (umask 022; cat > "$ROOT/state.json" <<'EOF'
+{
+  "claude_block": false,
+  "core_gid": null,
+  "core_uid": 0,
+  "killswitch": false,
+  "pending": null,
+  "rules_fp": null
+}
+EOF
+    )
+    if [ -f "$ROOT/guard.json" ]; then
+        /usr/bin/sed -i '' -e 's/"lockdown": true/"lockdown": false/' -e 's/"bad_streak": [0-9]*/"bad_streak": 0/' "$ROOT/guard.json"
+    fi
+    printf '{"ts": %s, "source": "NetGuard", "type": "recover", "severity": "低", "summary": "执行了紧急恢复（脚本）：已移除 NetGuard 的 pf 规则并关闭断网保护", "reasons": [], "detail": null}\n' \
+        "$(/bin/date +%s)" >> "$ROOT/events.jsonl" 2>/dev/null
+    echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') [recover] 紧急恢复（脚本）" >> "$ROOT/netguard.log" 2>/dev/null
+fi
+
+if [ "${1:-}" = "--stop" ]; then
+    echo "4/4 按要求保持 NetGuard 后台停止。重新启动：sudo launchctl bootstrap system $PLIST"
+elif [ -f "$PLIST" ]; then
+    echo "4/4 重新启动 NetGuard 后台（只做检查，断网保护已关闭，不会再拦网络）……"
+    /bin/launchctl bootstrap system "$PLIST" 2>/dev/null || true
+fi
+
+left=$(/sbin/pfctl -a "$ANCHOR" -sr 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+echo
+if [ "$left" = "0" ]; then
+    echo "完成：NetGuard 的断网规则已全部移除。"
+else
+    echo "警告：锚点里仍有 $left 条规则，请把这段输出发给维护者。"
+fi
+echo "如果仍不能上网，原因不在 NetGuard：检查 FlClash 是否在运行、系统设置里的 DNS/代理，或重启 FlClash。"

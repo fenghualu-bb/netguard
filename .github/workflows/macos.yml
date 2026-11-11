@@ -1,0 +1,62 @@
+name: macOS NetGuard
+
+on:
+  push:
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos.yml"
+  pull_request:
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Offline tests (system Python 3.9)
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python unit tests with /usr/bin/python3
+        run: |
+          /usr/bin/python3 --version
+          cd macos && /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Shell syntax
+        run: |
+          for f in macos/install.sh macos/uninstall.sh macos/bin/* macos/scripts/recover.command macos/ci/integration.sh; do
+            bash -n "$f"
+          done
+      - name: Rendered rules pass pfctl syntax check (no load)
+        run: |
+          for dns in false true; do
+            /usr/bin/python3 -c "
+          import sys; sys.path.insert(0, 'macos')
+          from netguard import config, pfrules
+          print(pfrules.render(config.validate({'block_lan_dns': $([ $dns = true ] && echo True || echo False)}), 0, 20))" > /tmp/rules.conf
+            cat /tmp/rules.conf
+            sudo /sbin/pfctl -n -a 'com.apple/zz.NetGuard' -f /tmp/rules.conf
+          done
+      - name: Build menu bar app
+        run: |
+          xcrun swiftc -O -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" \
+            -o /tmp/NetGuard macos/app/NetGuardApp.swift -framework AppKit -framework SwiftUI
+          plutil -lint macos/app/Info.plist macos/launchd/*.plist
+
+  integration:
+    name: Real pf integration (disposable VM)
+    needs: offline
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, probe, rollback, boot re-apply, recover, uninstall
+        run: sudo -E bash macos/ci/integration.sh
+      - name: NetGuard logs on failure
+        if: failure()
+        run: |
+          sudo cat /Library/NetGuard/netguard.log /Library/NetGuard/daemon.err.log 2>/dev/null | tail -n 200 || true
+          sudo /sbin/pfctl -a 'com.apple/zz.NetGuard' -sr 2>/dev/null || true

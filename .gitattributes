@@ -4,3 +4,6 @@
 *.py -text
 *.pyw -text
 *.cs -text
+# macOS sources must stay LF so shell scripts and Python run on the Mac.
+macos/** text eol=lf
+.github/** text eol=lf

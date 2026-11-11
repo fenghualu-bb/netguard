@@ -23,3 +23,6 @@ outputs/
 work/
 build/
 dist/
+
+# CI workflows are source, not runtime data.
+!.github/workflows/*.yml

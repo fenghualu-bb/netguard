@@ -1,0 +1,35 @@
+#!/bin/sh
+# NetGuard LaunchDaemon entry. pf rules live in memory and vanish at reboot, so when the
+# kill switch is wanted the last loaded rules are re-applied here with pfctl alone, before
+# Python starts. Then the Python watch loop takes over (it re-checks everything).
+ROOT=/Library/NetGuard
+ANCHOR='com.apple/zz.NetGuard'
+LOG="$ROOT/netguard.log"
+
+stamp() { /bin/date '+%Y-%m-%d %H:%M:%S'; }
+
+if [ -f "$ROOT/state.json" ] && /usr/bin/grep -q '"killswitch": true' "$ROOT/state.json" \
+        && [ -f "$ROOT/anchor.rules" ]; then
+    if ! /sbin/pfctl -a "$ANCHOR" -sr 2>/dev/null | /usr/bin/grep -q 'ng_block_all'; then
+        if /sbin/pfctl -a "$ANCHOR" -f "$ROOT/anchor.rules" 2>>"$LOG"; then
+            echo "$(stamp) [boot] 已在 Python 启动前重新加载断网保护规则" >> "$LOG"
+        else
+            echo "$(stamp) [boot] 重新加载断网保护规则失败（watch 会重试）" >> "$LOG"
+        fi
+    fi
+    token=$(/bin/cat "$ROOT/pf-token" 2>/dev/null)
+    live=1
+    if [ -n "$token" ]; then
+        /sbin/pfctl -s References 2>/dev/null | /usr/bin/awk -v t="$token" \
+            '$1 ~ /^[0-9]+$/ { for (i = 2; i <= NF; i++) if ($i == t) f = 1 } END { exit !f }' && live=0
+    fi
+    if [ "$live" -ne 0 ]; then
+        out=$(/sbin/pfctl -E 2>&1)
+        t=$(printf '%s\n' "$out" | /usr/bin/sed -n 's/.*Token[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | /usr/bin/head -n 1)
+        if [ -n "$t" ]; then
+            (umask 077; printf '%s\n' "$t" > "$ROOT/pf-token")
+        fi
+    fi
+fi
+
+exec "$ROOT/bin/netguard" watch
