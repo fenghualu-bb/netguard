@@ -875,6 +875,22 @@ class WhitelistAndStatusTests(unittest.TestCase):
             self.assertEqual(json.load(stream)["observations"]["tun"], "utun5")
 
 
+def shell_scripts():
+    """Every shell script in macos/ (by extension or shebang), so a new script is never missed."""
+    out = []
+    for base, _dirs, names in os.walk(MACOS):
+        for name in names:
+            path = os.path.join(base, name)
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    first = stream.readline()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if name.endswith((".sh", ".command")) or first.startswith(("#!/bin/sh", "#!/bin/bash")):
+                out.append(os.path.relpath(path, MACOS))
+    return sorted(out)
+
+
 class SafetyStaticTests(unittest.TestCase):
     """Commands that could leave the Mac offline or break other pf users must not appear."""
 
@@ -940,8 +956,7 @@ class SafetyStaticTests(unittest.TestCase):
         bash = shutil.which("bash")
         if not bash:
             self.skipTest("bash not available")
-        for rel in ("install.sh", "uninstall.sh", "bin/netguard", "bin/netguard-boot", "bin/netguard-recover",
-                    "scripts/recover.command", "ci/integration.sh", "patches/claudeguard/apply.sh"):
+        for rel in shell_scripts():
             path = os.path.join(MACOS, rel)
             if not os.path.exists(path):
                 continue
@@ -951,8 +966,9 @@ class SafetyStaticTests(unittest.TestCase):
     def test_shell_variables_braced_before_non_ascii(self):
         # macOS /bin/bash 3.2 reads UTF-8 bytes after `$NAME` as part of the name (set -u aborts).
         pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])")
-        for rel in ("install.sh", "uninstall.sh", "bin/netguard", "bin/netguard-boot", "bin/netguard-recover",
-                    "scripts/recover.command", "ci/integration.sh"):
+        scripts = shell_scripts()
+        self.assertIn(os.path.join("patches", "claudeguard", "apply.sh"), scripts)
+        for rel in scripts:
             with open(os.path.join(MACOS, rel), encoding="utf-8") as stream:
                 self.assertEqual(pat.findall(stream.read()), [], rel)
 

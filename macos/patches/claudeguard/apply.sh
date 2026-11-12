@@ -23,7 +23,7 @@ die() { echo "失败：$*" >&2; exit 1; }
 sha() { /usr/bin/shasum -a 256 "$1" | /usr/bin/cut -d' ' -f1; }
 
 [ "$(id -u)" -ne 0 ] || die "请以桌面用户身份运行（不要用 sudo）"
-[ -f "$TARGET" ] || die "没有找到 $TARGET（ClaudeGuard 未安装？）"
+[ -f "$TARGET" ] || die "没有找到 ${TARGET}（ClaudeGuard 未安装？）"
 CURRENT="$(sha "$TARGET")"
 
 case "$MODE" in
@@ -65,9 +65,9 @@ PY
         cp -p "$BACKUP" "$TARGET"
         die "补丁结果校验不符，已还原原文件"
     fi
-    echo "已应用 ClaudeGuard 补丁（原文件备份：$BACKUP）。"
+    echo "已应用 ClaudeGuard 补丁（原文件备份：${BACKUP}）。"
 else
-    die "integrity.py 既不是 61b61e1 原版也不是补丁版（sha256 $CURRENT），拒绝修改。ClaudeGuard 可能已升级，请交给维护者。"
+    die "integrity.py 既不是 61b61e1 原版也不是补丁版（sha256 ${CURRENT}），拒绝修改。ClaudeGuard 可能已升级，请交给维护者。"
 fi
 
 CG="$HOME/.local/bin/claudeguard"
