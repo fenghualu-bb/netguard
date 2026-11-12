@@ -90,6 +90,13 @@ chown root:wheel "$ROOT/events.jsonl" "$ROOT/netguard.log"; chmod 644 "$ROOT/eve
 
 NETGUARD_INSTALL_USER="$USER_NAME" "$ROOT/bin/netguard" init-config
 
+# Where this copy came from, so the app's "update" button can pull and reinstall it.
+REPO="$(cd "$SRC/.." && pwd)"
+COMMIT="$(sudo -u "$USER_NAME" git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+"$PY" -c 'import json, sys; json.dump({"repo": sys.argv[1], "commit": sys.argv[2], "user": sys.argv[3], "installed_at": sys.argv[4]}, open(sys.argv[5], "w"))' \
+    "$REPO" "$COMMIT" "$USER_NAME" "$(date '+%Y-%m-%d %H:%M')" "$ROOT/source.json"
+chown root:wheel "$ROOT/source.json"; chmod 644 "$ROOT/source.json"
+
 say "注册后台 ${LABEL}（开机自启，每 10 秒检查一次）"
 install -o root -g wheel -m 644 "$SRC/launchd/$LABEL.plist" "$PLIST"
 plutil -lint "$PLIST" >/dev/null

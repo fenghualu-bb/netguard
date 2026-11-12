@@ -24,12 +24,16 @@ from . import VERSION, claude, config, events, notify, paths, pfrules, probes as
 CONFIRM = 2
 INTERVAL = 10
 ENFORCE_EVERY = 2
+ENFORCE_ISOLATED = 0.5  # while Claude is isolated, relaunches are ended within half a second
 GRACE_SECONDS = 180
 PENDING_SECONDS = 120
 SHUTDOWN_WINDOW = 600  # a medium-only lockdown this close before boot came from the shutdown
+CLAUDE_PATH_SETTLE = 90  # ClaudeGuard re-attaches its hooks every 60 s after a Claude update
+EXEMPT_CHECK_EVERY = 60
+DNS_PROBLEM = "DNS 解析失败"
 
 STATE_DEFAULTS = {"killswitch": False, "claude_block": False, "core_uid": 0, "core_gid": None,
-                  "rules_fp": None, "pending": None}
+                  "rules_fp": None, "pending": None, "dns_block": False}
 GUARD_DEFAULTS = {"enabled": True, "lockdown": False, "since": 0, "reasons": [], "reason_codes": [], "bad_streak": 0,
                   "last_check": 0, "last_findings": [], "triggers": 0, "grace_until": 0,
                   "grace_noted": 0, "observations": {}}
@@ -59,6 +63,9 @@ class Service:
         self._killer = killer
         self.resume_at = 0
         self._last_kill_event = 0
+        self._first_seen = {}
+        self._last_exempt_check = 0
+        self._exempt_seen = set()
 
     # ------------------------------------------------------------------ io
     def read_state(self):
@@ -106,8 +113,10 @@ class Service:
         return claude.stop(claude.find(self.probes, self.cfg))
 
     # ------------------------------------------------------------------ pf
-    def apply_rules(self, core_gid):
-        text = pfrules.render(self.cfg, 0, core_gid)
+    def apply_rules(self, core_gid, state=None):
+        state = state if state is not None else self.read_state()
+        text = pfrules.render(self.cfg, 0, core_gid, dns_block=bool(state.get("dns_block")),
+                              isolate=bool(state.get("claude_block")))
         self.pf.load(text)
         util.write_text(paths.ANCHOR_FILE, text, mode=0o644)
         token = self.pf.acquire_token(self.read_token())
@@ -140,7 +149,7 @@ class Service:
             integ["error"] = integ.get("error") or "缺少代理内核的用户组，需重新开启断网保护"
             return integ
         try:
-            fp = self.apply_rules(state["core_gid"])
+            fp = self.apply_rules(state["core_gid"], state)
             restored = not (integ["rules_match"] and integ["pf_enabled"])
             state["rules_fp"] = fp
             self.write_state(state)
@@ -153,9 +162,16 @@ class Service:
         integ["token_live"] = self.token_live()
         return integ
 
+    def refresh_rules(self, state):
+        """Reload after claude_block/dns_block changed (Anthropic isolation, DNS mode)."""
+        if state.get("killswitch") and state.get("core_gid"):
+            state["rules_fp"] = self.apply_rules(state["core_gid"], state)
+        self.write_state(state)
+
     def rollback(self, state, prev, reason):
+        state["dns_block"] = bool(prev.get("dns_block"))
         if prev.get("killswitch") and prev.get("core_gid"):
-            state["rules_fp"] = self.apply_rules(prev["core_gid"])
+            state["rules_fp"] = self.apply_rules(prev["core_gid"], state)
         else:
             self.remove_rules()
             state["rules_fp"] = None
@@ -206,8 +222,16 @@ class Service:
             f.append(events.finding("core", "FlClash 内核未获授权（TUN 未开启），断网保护会拦住它的流量"))
         tun = self.probes.tun_interface()
         obs["tun"] = tun
+        obs["route"] = self.probes.route_interface()
         if not tun:
             f.append(events.finding("tun", "TUN 虚拟网卡未连接"))
+        elif obs["route"] and obs["route"] != tun:
+            f.append(events.finding("tun", "TUN 已连接，但公网流量没有经过它（路由指向 %s）" % obs["route"]))
+        obs["flclash_ui"] = self.probes.flclash_ui()
+        fl = self.probes.flclash_config()
+        obs["flclash"] = fl
+        if cfg["require_global_mode"] and fl.get("mode") in ("rule", "direct"):
+            f.append(events.finding("mode", "FlClash 是%s模式，不是全局模式" % {"rule": "规则", "direct": "直连"}[fl["mode"]]))
         if state.get("killswitch") and integ is not None:
             obs["integrity"] = integ
             # As on Windows: a failed read is not proof of missing rules (shown in status only).
@@ -220,9 +244,37 @@ class Service:
             obs["claudeguard"] = cg
             if not cg["installed"] or not cg["fresh"]:
                 f.append(events.finding("guard_daemon", "ClaudeGuard 未运行或状态过期"))
-            elif cg.get("error"):
-                f.append(events.finding("guard_helper", "ClaudeGuard 执行出错：%s" % str(cg["error"])[:120]))
+            else:
+                if cg.get("protection_enabled") is False:
+                    f.append(events.finding("guard_off", "ClaudeGuard 的保护被关闭"))
+                if cg.get("error"):
+                    f.append(events.finding("guard_helper", "ClaudeGuard 执行出错：%s" % str(cg["error"])[:120]))
+            if cg["installed"]:
+                if cg.get("helper_loaded") is False:
+                    f.append(events.finding("guard_helper", "ClaudeGuard 的 root 网络助手（com.claudeguard.helper）未运行"))
+                broken = []
+                if cg.get("cli_hooked") is False:
+                    loose = [l["path"] for l in cg.get("cli_links") or [] if not l["guarded"]]
+                    broken.append("claude 命令没有经过 ClaudeGuard" + ("（%s）" % "、".join(loose) if loose else "（缺少钩子）"))
+                if cg.get("cli_path_ok") is False:
+                    broken.append("ClaudeGuard 记录的 Claude Code 路径已失效")
+                if cg.get("app_path_ok") is False:
+                    broken.append("ClaudeGuard 记录的 Claude 桌面版路径已失效")
+                if broken:
+                    f.append(events.finding("claude_path", "；".join(broken)))
         return f, obs
+
+    def settle(self, findings):
+        """claude_path counts only after it persists past ClaudeGuard's own 60 s self-repair."""
+        now = self.clock()
+        keys = set(x["key"] for x in findings)
+        for key in list(self._first_seen):
+            if key not in keys:
+                del self._first_seen[key]
+        for key in keys:
+            self._first_seen.setdefault(key, now)
+        return [x for x in findings
+                if x["key"] != "claude_path" or now - self._first_seen[x["key"]] >= CLAUDE_PATH_SETTLE]
 
     def grace_info(self):
         now = self.clock()
@@ -238,16 +290,66 @@ class Service:
                 "anchor": int(anchor), "reason": "开机 / 登录 / 唤醒"}
 
     # ------------------------------------------------------------------ watch
+    def dns_safety_valve(self, state, obs):
+        """With block_lan_dns "auto", never leave the Mac without DNS (the previous failure mode).
+
+        If the router DNS is blocked, the proxy is healthy and DNS no longer resolves (for example
+        after joining another Wi-Fi), LAN DNS is reopened, which leaks only queried names to the
+        router, never the real IP to Anthropic. Recorded and notified; `enable` tries strict again.
+        """
+        if not (state.get("killswitch") and state.get("dns_block") and self.cfg["block_lan_dns"] == "auto"):
+            return False
+        core = obs.get("core") or {}
+        if not (core.get("privileged") and obs.get("tun")):
+            return False
+        if self.probes.dns_reachable() or self.probes.dns_reachable():
+            return False
+        state["dns_block"] = False
+        self.refresh_rules(state)
+        events.add("dns_relaxed", "系统 DNS 指向局域网路由器，拦截它会导致无法解析：已改为放行局域网 DNS"
+                                  "（只向路由器暴露查询的域名，不泄露真实 IP）")
+        self.notify("NetGuard：已放行局域网 DNS", "当前网络的 DNS 是路由器，为保证能上网已放行；重新开启断网保护时会再尝试拦截。",
+                    key="dns-relaxed", every=3600)
+        return True
+
+    def check_exemption(self, state, obs):
+        if not state.get("killswitch") or not state.get("core_gid"):
+            return
+        now = self.clock()
+        if now - self._last_exempt_check < EXEMPT_CHECK_EVERY:
+            obs["exempt_others"] = sorted(self._exempt_seen)
+            return
+        self._last_exempt_check = now
+        try:
+            names = set(self.probes.exemption_users(state["core_gid"], self.cfg["core_names"]))
+        except Exception:
+            names = set()
+        new = names - self._exempt_seen
+        self._exempt_seen = names
+        obs["exempt_others"] = sorted(names)
+        if new:
+            events.add("exempt", "注意：%s 以 root 身份联网，与 FlClash 内核共用放行身份，可绕过断网保护直连"
+                       % "、".join(sorted(new)), [events.finding("killswitch", "放行身份被其他程序使用")])
+            self.notify("NetGuard：发现其他程序直连", "、".join(sorted(new)) + " 以 root 身份联网，可能使用真实 IP。",
+                        key="exempt-" + ",".join(sorted(new)), every=3600)
+
     def tick(self):
+        started = self.clock()
         with util.StateLock():
             state = self.read_state()
             guard = self.read_guard()
             self.handle_pending(state)
             integ = self.ensure_rules(state) if state["killswitch"] else None
             findings, obs = self.observe(state, integ)
+            if self.dns_safety_valve(state, obs):
+                integ = self.ensure_rules(state)
+            self.check_exemption(state, obs)
+            obs["dns_block"] = bool(state.get("dns_block"))
             guard["last_check"] = int(self.clock())
             guard["last_findings"] = [x["text"] for x in findings]
             guard["observations"] = obs
+            guard["duration"] = round(self.clock() - started, 1)
+            findings = self.settle(findings)
             grace = self.grace_info()
             guard["grace_until"] = int(grace["until"]) if grace["active"] else 0
             if state["killswitch"] and not grace["active"] and \
@@ -293,7 +395,11 @@ class Service:
                 guard["reason_codes"] = sorted(set(x["key"] for x in findings))
                 guard["triggers"] = int(guard["triggers"]) + 1
                 state["claude_block"] = True
-                self.write_state(state)
+                try:
+                    self.refresh_rules(state)  # Anthropic ranges now refused through the TUN too
+                except pfrules.PFError as exc:
+                    self.write_state(state)
+                    util.log("隔离规则加载失败：%s" % exc, "watch")
                 killed = self.kill_claude()
                 summary = "已触发保护：Claude 已隔离，结束 %d 个 Claude 进程" % killed
                 events.add("trigger", summary, findings, {"killed": killed})
@@ -326,7 +432,7 @@ class Service:
         if findings:
             return False  # keep locked; retried every tick until everything is ready
         state["claude_block"] = False
-        self.write_state(state)
+        self.refresh_rules(state)
         guard.update({"lockdown": False, "bad_streak": 0, "reasons": [], "reason_codes": []})
         events.add("release", "开机后自动解除：锁定发生在关机过程中（代理先于 NetGuard 退出，仅中危），"
                               "开机后全部检查通过，Claude 可以使用")
@@ -352,19 +458,26 @@ class Service:
         except Exception as exc:  # status must always be written
             integ = {"complete": False, "error": str(exc)}
         wanted = bool(state["killswitch"])
+        last = events.read(1)
         status = {
-            "status_version": 1, "platform": "macos", "version": VERSION, "updated_at": int(self.clock()),
+            "status_version": 2, "platform": "macos", "version": VERSION, "updated_at": int(self.clock()),
             "wanted_killswitch": wanted,
             "killswitch_complete": bool(wanted and integ.get("complete")),
             "active_killswitch": bool(wanted and integ.get("complete") and integ.get("token_live")),
             "integrity": integ, "pending": state.get("pending"),
             "claude_block": bool(state["claude_block"]),
+            "realip": bool(state["claude_block"] and not guard.get("lockdown")),
+            "dns_block": bool(state.get("dns_block")),
             "guard": {k: guard.get(k) for k in ("enabled", "lockdown", "since", "reasons", "bad_streak",
-                                                "last_check", "last_findings", "triggers", "grace_until")},
+                                                "last_check", "last_findings", "triggers", "grace_until",
+                                                "duration")},
             "confirm": CONFIRM, "interval": INTERVAL,
             "observations": guard.get("observations") or {},
             "whitelist": self.cfg["whitelist"], "block_lan_dns": self.cfg["block_lan_dns"],
             "require_claudeguard": self.cfg["require_claudeguard"],
+            "require_global_mode": self.cfg["require_global_mode"],
+            "last_event": last[-1] if last else None,
+            "source": util.read_json(paths.SOURCE, None),
         }
         util.write_json(paths.STATUS, status, mode=0o644)
         return status
@@ -389,14 +502,17 @@ class Service:
             except Exception as exc:
                 util.log("写状态出错：%s" % exc, "watch")
             while True:
+                blocked = False
                 try:
-                    self.enforce_isolation()
+                    blocked = self.read_state()["claude_block"]
+                    if blocked:
+                        self.enforce_isolation()
                 except Exception as exc:
                     util.log("隔离执行出错：%s" % exc, "watch")
                 left = INTERVAL - (self.clock() - start)
                 if left <= 0:
                     break
-                self.sleep(min(ENFORCE_EVERY, left))
+                self.sleep(min(ENFORCE_ISOLATED if blocked else ENFORCE_EVERY, left))
             if not forever:
                 return
 
@@ -430,8 +546,8 @@ class Service:
 
     def post_check(self):
         problems = []
-        if not self.probes.dns_ok():
-            problems.append("DNS 解析失败" + ("（可能是 block_lan_dns 拦住了路由器 DNS）" if self.cfg["block_lan_dns"] else ""))
+        if not (self.probes.dns_reachable() and self.probes.dns_ok()):
+            problems.append(DNS_PROBLEM)
         ip = self.probes.egress(self.cfg["check_url"])
         if not ip:
             problems.append("开启后无法通过代理联网")
@@ -446,28 +562,40 @@ class Service:
 
     def enable(self, out=print):
         gid, before = self.preflight()
+        mode = self.cfg["block_lan_dns"]
+        attempts = [True, False] if mode == "auto" else [bool(mode)]
         with util.StateLock():
             state = self.read_state()
-            prev = {k: state.get(k) for k in ("killswitch", "core_gid")}
+            prev = {k: state.get(k) for k in ("killswitch", "core_gid", "dns_block")}
             state["pending"] = {"deadline": self.clock() + PENDING_SECONDS, "prev": prev}
             state["killswitch"] = True
             state["core_uid"] = 0
             state["core_gid"] = gid
-            self.write_state(state)
-            try:
-                state["rules_fp"] = self.apply_rules(gid)
+            problems, after, physical = [], None, []
+            for dns_block in attempts:
+                state["dns_block"] = dns_block
                 self.write_state(state)
-                out("规则已加载，正在自检（DNS、代理出口、直连是否被拦）……")
-                self.sleep(2)
-                problems, after, physical = self.post_check()
-            except Exception as exc:
-                problems, after, physical = ["加载或自检出错：%s" % exc], None, []
+                try:
+                    state["rules_fp"] = self.apply_rules(gid, state)
+                    self.write_state(state)
+                    out("规则已加载（局域网 DNS：%s），正在自检（DNS、代理出口、直连是否被拦）……"
+                        % ("拦截" if dns_block else "放行"))
+                    self.sleep(2)
+                    problems, after, physical = self.post_check()
+                except Exception as exc:
+                    problems, after, physical = ["加载或自检出错：%s" % exc], None, []
+                if not problems or not (dns_block and mode == "auto" and DNS_PROBLEM in problems):
+                    break
+                out("拦截局域网 DNS 后无法解析（系统 DNS 是路由器），改为放行局域网 DNS 再试……")
             if problems:
                 self.rollback(state, prev, "开启断网保护后自检未通过，已恢复操作前状态：" + "；".join(problems))
                 raise UserError("开启后自检未通过，已自动恢复，网络不受影响：\n- " + "\n- ".join(problems))
             state["pending"] = None
             self.write_state(state)
-        events.add("config", "断网保护已开启（出口 %s）" % after, [events.finding("user", "用户开启断网保护")])
+        if mode == "auto" and not state["dns_block"]:
+            events.add("dns_relaxed", "开启时发现系统 DNS 是局域网路由器：局域网 DNS 保持放行（只暴露查询的域名，不泄露真实 IP）")
+        events.add("config", "断网保护已开启（出口 %s；局域网 DNS %s）" % (after, "拦截" if state["dns_block"] else "放行"),
+                   [events.finding("user", "用户开启断网保护")])
         util.log("已开启，出口 %s" % after, "enable")
         if not physical:
             out("提示：没找到活动的物理网卡，未做直连拦截测试。")
@@ -504,7 +632,7 @@ class Service:
                 events.add("release_refused", "解除被拒绝：检查仍未通过，保持锁定", findings)
                 raise UserError("仍有异常，保持锁定：" + "；".join(x["text"] for x in findings))
             state["claude_block"] = False
-            self.write_state(state)
+            self.refresh_rules(state)
             guard.update({"lockdown": False, "bad_streak": 0, "reasons": [], "reason_codes": []})
             self.write_guard(guard)
             events.add("release", "检查全部通过，已解除锁定，Claude 可以重新打开")
@@ -524,7 +652,7 @@ class Service:
         with util.StateLock():
             state = self.read_state()
             state["claude_block"] = True
-            self.write_state(state)
+            self.refresh_rules(state)
         killed = self.kill_claude()
         events.add("isolate", "已隔离 Claude（用户进入真实 IP 模式），结束 %d 个进程" % killed,
                    [events.finding("user", "用户进入真实 IP 模式")])
@@ -542,7 +670,7 @@ class Service:
                                 % (ip, cip))
             state = self.read_state()
             state["claude_block"] = False
-            self.write_state(state)
+            self.refresh_rules(state)
         events.add("unisolate", "已解除 Claude 隔离（出口 %s 已核实在白名单）" % ip,
                    [events.finding("user", "用户退出真实 IP 模式")])
         out("已解除 Claude 隔离，出口 %s。" % ip)
@@ -561,7 +689,8 @@ class Service:
             except pfrules.PFError as exc:
                 out("移除规则时出错（继续）：%s" % exc)
             state = self.read_state()
-            state.update({"killswitch": False, "claude_block": False, "rules_fp": None, "pending": None})
+            state.update({"killswitch": False, "claude_block": False, "rules_fp": None, "pending": None,
+                          "dns_block": False})
             self.write_state(state)
             guard = self.read_guard()
             guard.update({"lockdown": False, "bad_streak": 0})
@@ -624,20 +753,34 @@ class Service:
         row(obs["claude_egress_ok"], "claude.ai 出口在白名单", str(obs["claude_egress"]))
         row(obs["core"]["running"] and obs["core"]["privileged"], "FlClash 内核以 root 运行（TUN 已授权）")
         row(bool(obs["tun"]), "TUN 网卡", str(obs["tun"]))
+        row(bool(obs["tun"]) and obs.get("route") == obs["tun"], "公网流量经过 TUN", "路由接口 %s" % obs.get("route"))
+        mode = (obs.get("flclash") or {}).get("mode")
+        if self.cfg["require_global_mode"]:
+            row(mode == "global", "FlClash 全局模式", {"global": "全局", "rule": "规则", "direct": "直连"}.get(mode, "读不到配置"))
         row(state["killswitch"], "断网保护已开启")
         if integ is not None:
             row(integ["complete"], "pf 规则完整", "pf=%s 锚点引用=%s 规则=%s 条" % (
                 integ["pf_enabled"], integ["main_anchor_ref"], integ["rule_count"]))
             row(integ.get("token_live", False), "pf 启用引用（token）有效")
-            row(self.probes.dns_ok(), "DNS 解析正常")
+            row(self.probes.dns_ok() and self.probes.dns_reachable(), "DNS 解析正常（含不经缓存的直接查询）")
+            out("ℹ️ 局域网 DNS：%s（设置 %s）" % ("拦截" if state.get("dns_block") else "放行", self.cfg["block_lan_dns"]))
             physical = self.probes.physical_interfaces()
             for iface in physical:
                 leaked = self.probes.direct_bypass(iface, self.cfg["bypass_probe_targets"][0])
                 row(not leaked, "绑定 %s 直连被拦截" % iface)
+            others = self.probes.exemption_users(state.get("core_gid"), self.cfg["core_names"]) \
+                if state.get("core_gid") else []
+            row(not others, "没有其他程序使用代理内核的放行身份联网", "、".join(others))
         if self.cfg["require_claudeguard"]:
             cg = obs.get("claudeguard") or {}
             row(cg.get("installed") and cg.get("fresh"), "ClaudeGuard 正在运行",
                 "状态 %s，%s 秒前更新" % (cg.get("state"), cg.get("age")))
+            row(cg.get("protection_enabled") is not False, "ClaudeGuard 保护开启")
+            row(cg.get("helper_loaded") is True, "ClaudeGuard root 网络助手在运行")
+            row(cg.get("cli_hooked") is True, "claude 命令经过 ClaudeGuard",
+                "、".join(l["path"] for l in cg.get("cli_links") or []))
+            row(cg.get("app_path_ok") is not False and cg.get("cli_path_ok") is not False,
+                "ClaudeGuard 记录的 Claude 路径有效", str(cg.get("app_path")))
         guard = self.read_guard()
         row(not guard["lockdown"], "没有自动防护锁定", "；".join(guard.get("reasons") or []))
         out("界面绿色只表示当前检查通过；真实停代理、睡眠唤醒、切换网络需另行验收（见 macos/ACCEPTANCE.md）。")

@@ -32,6 +32,7 @@ if [ -d "$ROOT" ]; then
   "claude_block": false,
   "core_gid": null,
   "core_uid": 0,
+  "dns_block": false,
   "killswitch": false,
   "pending": null,
   "rules_fp": null

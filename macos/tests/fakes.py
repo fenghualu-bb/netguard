@@ -103,7 +103,16 @@ class FakeProbes:
         self.boot = 0
         self.wake = 0
         self.login = 0
-        self.cg = {"installed": True, "fresh": True, "age": 1.0, "state": "allowed", "error": None}
+        self.cg = {"installed": True, "fresh": True, "age": 1.0, "state": "allowed", "error": None,
+                   "ip": "203.0.113.10", "protection_enabled": True, "helper_loaded": True,
+                   "cli_hooked": True, "cli_links": [{"path": "/Users/alice/.local/bin/claude", "guarded": True}],
+                   "app_path": "/Applications/Claude.app", "app_path_ok": True, "cli_path_ok": True}
+        self.ui = True
+        self.mode = "global"
+        self.route = None  # None = same as tun
+        self.dns_reach = True
+        self.dns_calls = 0
+        self.exempt = []
         self.procs = []
         self.args = {}
 
@@ -142,6 +151,23 @@ class FakeProbes:
 
     def processes(self):
         return list(self.procs)
+
+    def flclash_ui(self):
+        return self.ui
+
+    def flclash_config(self):
+        return {"mode": self.mode, "path": "/Users/alice/Library/Application Support/com.follow.clash/config.yaml",
+                "mtime": 1, "source": "config.yaml"}
+
+    def route_interface(self, target="1.1.1.1"):
+        return self.route if self.route is not None else self.tun
+
+    def dns_reachable(self, name="www.apple.com"):
+        self.dns_calls += 1
+        return self.dns_reach(self) if callable(self.dns_reach) else self.dns_reach
+
+    def exemption_users(self, gid, names):
+        return list(self.exempt)
 
     def process_args(self):
         return dict(self.args)

@@ -32,12 +32,13 @@ jobs:
           done
       - name: Rendered rules pass pfctl syntax check (no load)
         run: |
-          for dns in false true; do
+          for variant in "False False" "True False" "False True" "True True"; do
+            set -- $variant
             /usr/bin/python3 -c "
           import sys; sys.path.insert(0, 'macos')
           from netguard import config, pfrules
-          print(pfrules.render(config.validate({'block_lan_dns': $([ $dns = true ] && echo True || echo False)}), 0, 20))" > /tmp/rules.conf
-            cat /tmp/rules.conf
+          print(pfrules.render(config.validate({}), 0, 20, dns_block=$1, isolate=$2))" > /tmp/rules.conf
+            echo "--- dns_block=$1 isolate=$2"; cat /tmp/rules.conf
             sudo /sbin/pfctl -n -a 'com.apple/zz.NetGuard' -f /tmp/rules.conf
           done
       - name: Build menu bar app

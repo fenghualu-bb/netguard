@@ -23,9 +23,14 @@ DEFAULTS = {
     "lan_v4": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
                "100.64.0.0/10", "224.0.0.0/4", "255.255.255.255/32"],
     "lan_v6": ["fe80::/10", "ff00::/8", "fc00::/7"],
-    # Windows blocks DNS to the LAN router too. On macOS the system resolver is often the
-    # router itself; blocking it would leave "Wi-Fi connected, nothing opens". Opt-in only.
-    "block_lan_dns": False,
+    # Windows blocks DNS to the LAN router too. "auto" does the same whenever the Mac's
+    # resolver still works with it (DNS goes through the TUN); if the system resolver is the
+    # router itself, blocking it would leave "Wi-Fi connected, nothing opens", so LAN DNS is
+    # then kept open and the decision is recorded. true = always block (enable fails if DNS
+    # breaks), false = never block.
+    "block_lan_dns": "auto",
+    # Require FlClash global mode (rule mode can send Claude DIRECT). Windows only displays it.
+    "require_global_mode": True,
     "anthropic_v4": ANTHROPIC_V4,
     "anthropic_v6": ANTHROPIC_V6,
     "claude_app_paths": ["/Applications/Claude.app"],
@@ -76,8 +81,10 @@ def validate(data):
         raise ConfigError("core_names 必须是非空的程序名列表")
     if not all(isinstance(p, str) and p.startswith("/") and p.endswith(".app") for p in cfg["claude_app_paths"]):
         raise ConfigError("claude_app_paths 必须是 .app 绝对路径")
-    for key in ("block_lan_dns", "require_claudeguard"):
+    for key in ("require_claudeguard", "require_global_mode"):
         cfg[key] = bool(cfg[key])
+    if cfg["block_lan_dns"] not in (True, False, "auto"):
+        raise ConfigError('block_lan_dns 只能是 true、false 或 "auto"')
     targets = []
     for value in cfg["bypass_probe_targets"]:
         addr = ipaddress.ip_address(str(value))

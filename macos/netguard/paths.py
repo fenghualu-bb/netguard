@@ -44,3 +44,5 @@ LAUNCHCTL = "/bin/launchctl"
 OSASCRIPT = "/usr/bin/osascript"
 SUDO = "/usr/bin/sudo"
 DSCACHEUTIL = "/usr/bin/dscacheutil"
+DIG = "/usr/bin/dig"
+SOURCE = p("source.json")  # repository path and commit recorded by install.sh (for the app's update button)

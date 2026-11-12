@@ -1,5 +1,6 @@
 """Read-only observations of the Mac. Every method is overridable in tests."""
 import ipaddress
+import json
 import os
 import re
 import time
@@ -186,16 +187,95 @@ class Probes:
                     return int(time.time() - elapsed)
         return None
 
-    # ---- ClaudeGuard (upstream macOS version) ----
-    def claudeguard(self):
+    def user_home(self):
         user = self.console_user()
-        info = {"installed": False, "fresh": False, "age": None, "state": None, "error": None}
         if not user:
-            return info
+            return None
         import pwd
         try:
-            home = pwd.getpwnam(user[0]).pw_dir
+            return pwd.getpwnam(user[0]).pw_dir
         except KeyError:
+            return None
+
+    # ---- FlClash ----
+    def flclash_ui(self):
+        return any(os.path.basename(r["comm"]) == "FlClash" for r in self.processes())
+
+    def flclash_config(self):
+        """Proxy mode from FlClash's own files. Only the mode is read; never nodes or credentials."""
+        home = self.user_home()
+        result = {"mode": None, "path": None, "mtime": None, "source": None}
+        if not home:
+            return result
+        bases = [os.path.join(home, "Library", "Application Support", "com.follow.clash"),
+                 os.path.join(home, "Library", "Containers", "com.follow.clash", "Data", "Library",
+                              "Application Support", "com.follow.clash")]
+        found = []
+        for base in bases:
+            path = os.path.join(base, "config.yaml")
+            try:
+                found.append((os.stat(path).st_mtime, path))
+            except OSError:
+                continue
+        if found:
+            mtime, path = max(found)
+            result.update(path=path, mtime=int(mtime), source="config.yaml")
+            try:
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as stream:
+                    head = stream.read(400_000)
+                mode = re.search(r'^mode:\s*["\']?(global|rule|direct)["\']?\s*(?:#.*)?$', head, re.M | re.I)
+                if mode:
+                    result["mode"] = mode.group(1).lower()
+            except OSError:
+                pass
+        if result["mode"] is None:
+            for base in bases:
+                prefs = util.read_json(os.path.join(base, "shared_preferences.json"), None)
+                try:
+                    patch = json.loads(prefs["flutter.config"])["patchClashConfig"]
+                    mode = str(patch.get("mode", "")).lower()
+                except (TypeError, KeyError, ValueError):
+                    continue
+                if mode in ("global", "rule", "direct"):
+                    result.update(mode=mode, path=os.path.join(base, "shared_preferences.json"),
+                                  source="shared_preferences.json")
+                    break
+        return result
+
+    def route_interface(self, target="1.1.1.1"):
+        out = self.runner([paths.ROUTE, "-n", "get", target]).stdout
+        match = re.search(r"interface:\s*(\S+)", out or "")
+        return match.group(1) if match else None
+
+    # ---- DNS that bypasses every cache: the system resolver's first server, asked directly ----
+    def dns_reachable(self, name="www.apple.com"):
+        result = self.runner([paths.DIG, "+time=3", "+tries=1", "+short", name], timeout=8)
+        return result.returncode == 0 and bool(re.search(r"^\d+\.\d+\.\d+\.\d+$", result.stdout or "", re.M))
+
+    # ---- programs that share the proxy core's pf exemption (uid 0 + user group) ----
+    def exemption_users(self, core_gid, core_names):
+        others = [r for r in self.processes()
+                  if r["uid"] == 0 and r["gid"] == core_gid and os.path.basename(r["comm"]) not in core_names]
+        if not others:
+            return []
+        pids = ",".join(str(r["pid"]) for r in others)
+        out = self.runner(["/usr/sbin/lsof", "+c", "0", "-nP", "-a", "-i", "-p", pids, "-Fpc"], timeout=15).stdout
+        names, current = set(), None
+        for line in (out or "").splitlines():
+            if line.startswith("p"):
+                current = line[1:]
+            elif line.startswith("c") and current:
+                names.add(line[1:])
+        return sorted(names)
+
+    # ---- ClaudeGuard (upstream macOS version) ----
+    def claudeguard(self):
+        info = {"installed": False, "fresh": False, "age": None, "state": None, "error": None,
+                "ip": None, "protection_enabled": None, "helper_loaded": None,
+                "cli_hooked": None, "cli_links": [], "app_path": None, "app_path_ok": None,
+                "cli_path_ok": None}
+        home = self.user_home()
+        if not home:
             return info
         info["installed"] = os.path.isdir("/Applications/ClaudeGuard.app") or \
             os.path.isdir(os.path.join(home, ".local", "share", "ClaudeGuard"))
@@ -207,5 +287,26 @@ class Probes:
                 info["age"] = None
             info["fresh"] = info["age"] is not None and -5 <= info["age"] <= 30
             info["state"] = data.get("state")
+            info["ip"] = data.get("ip")
+            info["protection_enabled"] = data.get("protection_enabled")
             info["error"] = data.get("enforcement_error") or None
+        info["helper_loaded"] = self.runner([paths.LAUNCHCTL, "print", "system/com.claudeguard.helper"],
+                                            timeout=10).returncode == 0
+        cfg = util.read_json(os.path.join(home, ".config", "claudeguard", "config.json"), {}) or {}
+        app = cfg.get("real_claude_app_path") if isinstance(cfg, dict) else None
+        cli = cfg.get("real_claude_cli_path") if isinstance(cfg, dict) else None
+        info["app_path"] = app
+        info["app_path_ok"] = bool(app and os.path.isdir(app)) if app else None
+        info["cli_path_ok"] = bool(cli and os.path.isfile(os.path.realpath(cli))) if cli else None
+        # Same rule as ClaudeGuard's own `doctor`: every `claude` in these directories must be
+        # ClaudeGuard's shim, otherwise typing `claude` bypasses the pre-flight check.
+        links = []
+        for directory in (os.path.join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"):
+            link = os.path.join(directory, "claude")
+            if os.path.lexists(link):
+                real = os.path.realpath(link)
+                ours = os.path.basename(real) == "cli_wrapper.py" or "/ClaudeGuard/" in real
+                links.append({"path": link, "guarded": ours})
+        info["cli_links"] = links
+        info["cli_hooked"] = bool(links) and all(l["guarded"] for l in links)
         return info

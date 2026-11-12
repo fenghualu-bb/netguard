@@ -150,10 +150,39 @@ if [ -n "$GW" ]; then
 fi
 if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
     probe_case "TUN 源地址流量放行（模拟进入 TUN 的流量）" - ng_tun runner -b 198.18.0.1 1.1.1.1 443 1500
-    /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null
+    probe_case "未隔离时 TUN 源地址去 Anthropic 放行" - ng_tun runner -b 198.18.0.1 160.79.104.10 443 1500
 else
     warn "无法添加 198.18.0.1 别名，跳过 TUN 源地址用例"
 fi
+
+echo "  -- 变体：隔离 Claude + 拦截局域网 DNS"
+py "
+from netguard import config, pfrules
+pfrules.PF().load(pfrules.render(config.validate({}), 0, $GID, dns_block=True, isolate=True))"
+check "变体规则已加载" anchor_loaded
+if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
+    probe_case "隔离时 TUN 源地址去 Anthropic 也被拦" FAIL ng_anthropic runner -b 198.18.0.1 160.79.104.10 443 1500
+    /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null
+fi
+probe_case "代理内核直连 1.1.1.1 仍放行（变体不影响代理）" OK ng_core core 1.1.1.1 443 5000
+if [ -n "$GW" ]; then
+    probe_case "局域网 DNS 被拦（dns_block）" - ng_dns runner -c "$GW" 53
+fi
+
+echo "  -- 放行身份被其他程序使用的检测（lsof）"
+sudo -u "$RUNNER" "$WORK/prober-core" 10.255.255.1 9 8000 >/dev/null 2>&1 &
+BG=$!
+sleep 1.5
+SEEN=$(py "
+from netguard import config, probes
+print(','.join(probes.Probes(config.validate({})).exemption_users($GID, ['FlClashCore'])))")
+echo "    检测到：$SEEN"
+check "检测到使用放行身份联网的 prober-core" grep -q "prober-core" <<<"$SEEN"
+SEEN2=$(py "
+from netguard import config, probes
+print(','.join(probes.Probes(config.validate({})).exemption_users($GID, ['prober-core'])))")
+check "把它当作代理内核时不再报告" [ -z "$SEEN2" ]
+kill "$BG" 2>/dev/null; wait "$BG" 2>/dev/null
 /sbin/pfctl -a "$ANCHOR" -F rules >/dev/null 2>&1
 /sbin/pfctl -X "$MATRIX_TOKEN" >/dev/null 2>&1; MATRIX_TOKEN=""
 check "矩阵清理后规则为空" anchor_empty

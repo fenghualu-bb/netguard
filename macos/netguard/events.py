@@ -14,6 +14,9 @@ RISK = {
     "tun": ("中", "TUN 虚拟网卡未连接：代理中断。断网保护会拦住直连，真实 IP 不会泄露，但保护链出现缺口。"),
     "guard_daemon": ("中", "ClaudeGuard 未运行或状态过期：少了它的 3 秒一次出口检查和 Claude 域名拦截，只剩 NetGuard 每 10 秒一次的检查。"),
     "guard_helper": ("中", "ClaudeGuard 报告执行错误：出口不对时，它可能无法拦截 Claude 域名。"),
+    "claude_path": ("高", "Claude 已更新或重装，ClaudeGuard 的钩子没有跟上：直接运行 claude 或打开 Claude 时可能绕过 ClaudeGuard 的出口检查。"),
+    "mode": ("中", "FlClash 不是全局模式：规则模式下 Claude 的部分流量可能被分流为直连（Anthropic 官方网段仍会被拦截，claude.ai 走 Cloudflare 的部分只能靠出口检查发现）。"),
+    "guard_off": ("中", "ClaudeGuard 的保护被关闭：出口不对时它不会拦截 Claude，只剩 NetGuard 每 10 秒一次的检查。"),
     "user": ("低", "用户主动操作，不是异常。"),
     "error": ("中", "检查过程出错，无法确认当前是否安全。"),
 }

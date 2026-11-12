@@ -27,8 +27,12 @@ def _list(values):
     return "{ " + ", ".join(values) + " }"
 
 
-def render(cfg, core_uid, core_gid):
+def render(cfg, core_uid, core_gid, dns_block=None, isolate=False):
     """Anchor text. core_uid/core_gid identify the FlClash core's sockets.
+
+    dns_block: block DNS outside the TUN including the LAN router (None = config value if it
+    is a boolean, else False). isolate: Claude is isolated, so Anthropic's ranges are refused
+    on every path, the TUN included.
 
     FlClash authorizes its core for TUN with `chown root:admin; chmod 4750`, so the
     core runs with effective uid 0 and the launching user's group (normally staff=20).
@@ -52,12 +56,16 @@ def render(cfg, core_uid, core_gid):
         "# Anthropic's published ranges: refused on every path except the proxy TUN, so a",
         "# DIRECT rule or a dropped tunnel cannot reach Claude with the real IP.",
     ]
+    src4 = "" if isolate else "from ! %s " % tun4
+    src6 = "" if isolate else "from ! %s " % tun6
+    if isolate:
+        lines.append("# Claude is isolated: Anthropic's ranges are refused through the TUN as well.")
     if cfg["anthropic_v4"]:
-        lines.append('block return out quick inet from ! %s to %s label "ng_anthropic"'
-                     % (tun4, _list(cfg["anthropic_v4"])))
+        lines.append('block return out quick inet %sto %s label "ng_anthropic"'
+                     % (src4, _list(cfg["anthropic_v4"])))
     if cfg["anthropic_v6"]:
-        lines.append('block return out quick inet6 from ! %s to %s label "ng_anthropic"'
-                     % (tun6, _list(cfg["anthropic_v6"])))
+        lines.append('block return out quick inet6 %sto %s label "ng_anthropic"'
+                     % (src6, _list(cfg["anthropic_v6"])))
     lines += [
         "",
         "# Default: no outbound traffic. Later permits override this (last match wins).",
@@ -69,7 +77,9 @@ def render(cfg, core_uid, core_gid):
         'pass out inet6 to %s keep state label "ng_lan"' % _list(cfg["lan_v6"]),
         'pass out inet6 proto tcp to %s flags any keep state label "ng_lan"' % _list(cfg["lan_v6"]),
     ]
-    if cfg["block_lan_dns"]:
+    if dns_block is None:
+        dns_block = cfg["block_lan_dns"] is True
+    if dns_block:
         lines += [
             "",
             "# DNS outside the TUN is refused, including the LAN router (opt-in).",

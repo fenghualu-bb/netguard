@@ -85,6 +85,20 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("scrub", text)
 
 
+class RenderModeTests(unittest.TestCase):
+    def test_isolation_refuses_anthropic_through_tun_too(self):
+        cfg = config.validate({})
+        normal = [l for l in pfrules.render(cfg, 0, 20).splitlines() if "ng_anthropic" in l]
+        isolated = [l for l in pfrules.render(cfg, 0, 20, isolate=True).splitlines() if "ng_anthropic" in l]
+        self.assertTrue(all("from !" in l for l in normal))
+        self.assertTrue(isolated and all("from" not in l for l in isolated))
+
+    def test_dns_block_parameter_overrides_auto(self):
+        cfg = config.validate({})
+        self.assertNotIn("ng_dns", pfrules.render(cfg, 0, 20))
+        self.assertIn("ng_dns", pfrules.render(cfg, 0, 20, dns_block=True))
+
+
 class ParserTests(unittest.TestCase):
     def test_token_and_references(self):
         self.assertEqual(pfrules.parse_token("No ALTQ support in kernel\npf enabled\nToken : 1234567\n"), "1234567")
@@ -134,9 +148,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.validate({"bypass_probe_targets": ["192.168.1.1"]})
 
-    def test_defaults_allow_lan_dns(self):
-        self.assertFalse(config.validate({})["block_lan_dns"])
+    def test_defaults(self):
+        self.assertEqual(config.validate({})["block_lan_dns"], "auto")
+        self.assertTrue(config.validate({})["require_global_mode"])
         self.assertIn("160.79.104.0/23", config.validate({})["anthropic_v4"])
+        with self.assertRaises(config.ConfigError):
+            config.validate({"block_lan_dns": "yes"})
 
 
 class ClaudeMatchTests(unittest.TestCase):
@@ -389,6 +406,181 @@ class WatchTests(unittest.TestCase):
         svc.watch(forever=False)
         self.assertGreaterEqual(len(kills) - before, 5)  # every 2 s within the 10 s interval
         self.assertTrue(os.path.exists(paths.STATUS))
+
+
+def router_dns(pf):
+    """System DNS is the LAN router: resolution works only while ng_dns is not loaded."""
+    return lambda probes: "ng_dns" not in pf.anchor_text
+
+
+class DnsModeTests(unittest.TestCase):
+    def test_auto_blocks_lan_dns_when_dns_goes_through_tun(self):
+        svc, pf, pr, *_ = make_service(self)
+        svc.enable(out=lambda *_: None)
+        self.assertTrue(svc.read_state()["dns_block"])
+        self.assertIn("ng_dns", pf.anchor_text)
+
+    def test_auto_keeps_lan_dns_open_when_router_is_the_resolver(self):
+        svc, pf, pr, *_ = make_service(self)
+        pr.dns_reach = router_dns(pf)
+        svc.enable(out=lambda *_: None)
+        st = svc.read_state()
+        self.assertTrue(st["killswitch"])
+        self.assertFalse(st["dns_block"])
+        self.assertNotIn("ng_dns", pf.anchor_text)
+        self.assertIn("dns_relaxed", types())
+
+    def test_strict_mode_rolls_back_instead_of_breaking_dns(self):
+        svc, pf, pr, *_ = make_service(self, block_lan_dns=True)
+        pr.dns_reach = router_dns(pf)
+        with self.assertRaises(UserError):
+            svc.enable(out=lambda *_: None)
+        self.assertEqual(pf.anchor_text, "")
+        self.assertFalse(svc.read_state()["killswitch"])
+
+    def test_safety_valve_after_network_change(self):
+        svc, pf, pr, clock, *_ = make_service(self)
+        svc.enable(out=lambda *_: None)
+        self.assertIn("ng_dns", pf.anchor_text)
+        pr.dns_reach = router_dns(pf)  # joined a Wi-Fi whose DNS is the router
+        svc.tick()
+        self.assertFalse(svc.read_state()["dns_block"])
+        self.assertNotIn("ng_dns", pf.anchor_text)
+        self.assertIn("ng_block_all", pf.anchor_text)
+        self.assertTrue(svc.pf.integrity(svc.read_state()["rules_fp"])["complete"])
+        self.assertIn("dns_relaxed", types())
+
+    def test_valve_never_fires_when_proxy_is_down(self):
+        svc, pf, pr, clock, *_ = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.dns_reach = False
+        pr.tun = None
+        svc.tick()
+        self.assertTrue(svc.read_state()["dns_block"])
+
+
+class NewFindingTests(unittest.TestCase):
+    def enabled(self, **kw):
+        svc, pf, pr, clock, kills, notes = make_service(self, **kw)
+        svc.enable(out=lambda *_: None)
+        return svc, pf, pr, clock, kills
+
+    def locks_after_two(self, svc):
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+        svc.tick()
+        return svc.read_guard()["lockdown"]
+
+    def test_rule_mode_locks(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.mode = "rule"
+        self.assertTrue(self.locks_after_two(svc))
+        self.assertTrue(any("规则模式" in r for r in svc.read_guard()["reasons"]))
+
+    def test_rule_mode_allowed_when_not_required(self):
+        svc, pf, pr, clock, kills = self.enabled(require_global_mode=False)
+        pr.mode = "rule"
+        svc.tick()
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+
+    def test_unknown_mode_is_not_a_finding(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.mode = None
+        svc.tick()
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+
+    def test_route_not_through_tun(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.route = "en0"
+        self.assertTrue(self.locks_after_two(svc))
+
+    def test_claudeguard_protection_off_and_helper(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.cg["protection_enabled"] = False
+        pr.cg["helper_loaded"] = False
+        svc.tick()
+        found = svc.read_guard()["last_findings"]
+        self.assertIn("ClaudeGuard 的保护被关闭", found)
+        self.assertTrue(any("com.claudeguard.helper" in x for x in found))
+
+    def test_claude_path_waits_for_claudeguard_self_repair(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.cg["cli_hooked"] = False
+        pr.cg["cli_links"] = [{"path": "/Users/alice/.local/bin/claude", "guarded": False}]
+        for _ in range(6):  # 60 s: ClaudeGuard would normally have re-hooked by now
+            svc.tick()
+            clock.advance(10)
+        self.assertFalse(svc.read_guard()["lockdown"])
+        for _ in range(5):
+            svc.tick()
+            clock.advance(10)
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+    def test_claude_path_is_high_even_in_grace(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.boot = int(clock())
+        pr.cg["app_path_ok"] = False
+        for _ in range(12):
+            svc.tick()
+            clock.advance(10)
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+    def test_release_refuses_broken_hooks_immediately(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.egress_ip = "192.0.2.5"
+        svc.tick()
+        svc.tick()
+        pr.egress_ip = "203.0.113.10"
+        pr.cg["cli_hooked"] = False
+        with self.assertRaises(UserError):
+            svc.release(out=lambda *_: None)
+
+    def test_lockdown_and_isolation_reload_rules(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        self.assertIn("from ! 198.18.0.0/16", pf.anchor_text)
+        pr.egress_ip = "192.0.2.5"
+        svc.tick()
+        svc.tick()
+        anth = [l for l in pf.anchor_text.splitlines() if "ng_anthropic" in l and not l.startswith("#")]
+        self.assertTrue(anth and all("from" not in l for l in anth))
+        self.assertTrue(svc.pf.integrity(svc.read_state()["rules_fp"])["complete"])
+        pr.egress_ip = "203.0.113.10"
+        svc.release(out=lambda *_: None)
+        self.assertIn("from ! 198.18.0.0/16", pf.anchor_text)
+        svc.isolate(out=lambda *_: None)
+        self.assertNotIn("from ! 198.18.0.0/16", pf.anchor_text)
+        svc.unisolate(out=lambda *_: None)
+        self.assertIn("from ! 198.18.0.0/16", pf.anchor_text)
+
+    def test_isolated_enforcement_every_half_second(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        svc.isolate(out=lambda *_: None)
+        before = len(kills)
+        svc.watch(forever=False)
+        self.assertGreaterEqual(len(kills) - before, 18)
+
+    def test_exemption_users_reported_once(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        pr.exempt = ["traceroute"]
+        svc.tick()
+        clock.advance(70)
+        svc.tick()
+        self.assertEqual(types().count("exempt"), 1)
+        self.assertEqual(svc.read_guard()["observations"]["exempt_others"], ["traceroute"])
+
+    def test_status_fields(self):
+        svc, pf, pr, clock, kills = self.enabled()
+        svc.isolate(out=lambda *_: None)
+        svc.tick()
+        st = svc.write_status()
+        self.assertTrue(st["realip"])
+        self.assertTrue(st["dns_block"])
+        self.assertEqual(st["status_version"], 2)
+        self.assertIsNotNone(st["last_event"])
+        self.assertIn("duration", st["guard"])
+        self.assertEqual(st["observations"]["flclash"]["mode"], "global")
 
 
 class ShutdownLockTests(unittest.TestCase):

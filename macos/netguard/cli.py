@@ -48,11 +48,21 @@ def print_status(status, out=print):
     out("  普通出口：%s %s   claude.ai 出口：%s %s" % (
         obs.get("egress"), "✓" if obs.get("egress_ok") else "✗",
         obs.get("claude_egress"), "✓" if obs.get("claude_egress_ok") else "✗"))
-    out("  FlClash 内核：%s   TUN：%s" % (
-        ("运行中（root 授权）" if core.get("privileged") else "运行中但未授权") if core.get("running") else "未运行",
-        obs.get("tun") or "未连接"))
+    fl = obs.get("flclash") or {}
+    out("  FlClash：界面%s 内核%s   TUN：%s（路由 %s）   模式：%s" % (
+        "✓" if obs.get("flclash_ui") else "✗",
+        ("✓ root 授权" if core.get("privileged") else "✓ 未授权") if core.get("running") else "✗",
+        obs.get("tun") or "未连接", obs.get("route") or "?",
+        {"global": "全局", "rule": "规则", "direct": "直连"}.get(fl.get("mode"), "待核实")))
+    out("  局域网 DNS：%s   真实 IP 模式：%s" % ("拦截" if status.get("dns_block") else "放行",
+                                            "是" if status.get("realip") else "否"))
     if status.get("require_claudeguard"):
-        out("  ClaudeGuard：%s" % (("运行中（%s）" % cg.get("state")) if cg.get("fresh") else "未运行或状态过期"))
+        out("  ClaudeGuard：%s  保护%s  网络助手%s  claude 钩子%s" % (
+            ("运行中（%s）" % cg.get("state")) if cg.get("fresh") else "未运行或状态过期",
+            "关" if cg.get("protection_enabled") is False else "开",
+            "✓" if cg.get("helper_loaded") else "✗", "✓" if cg.get("cli_hooked") else "✗"))
+    if obs.get("exempt_others"):
+        out("  注意：%s 与 FlClash 内核共用放行身份联网" % "、".join(obs["exempt_others"]))
     if guard.get("grace_until") and guard["grace_until"] > time.time():
         out("  开机/登录/唤醒宽限期至 %s（期间中危异常不锁定）" % _fmt_time(guard["grace_until"]))
     findings = guard.get("last_findings") or []
