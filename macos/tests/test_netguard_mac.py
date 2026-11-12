@@ -972,6 +972,13 @@ class SafetyStaticTests(unittest.TestCase):
             with open(os.path.join(MACOS, rel), encoding="utf-8") as stream:
                 self.assertEqual(pat.findall(stream.read()), [], rel)
 
+    def test_swift_string_literals_stay_on_one_line(self):
+        # A raw newline inside a Swift "..." literal breaks the on-device build.
+        with open(os.path.join(MACOS, "app", "NetGuardApp.swift"), encoding="utf-8") as stream:
+            lines = stream.read().splitlines()
+        bad = [no for no, line in enumerate(lines, 1) if line.split("//", 1)[0].count('"') % 2]
+        self.assertEqual(bad, [])
+
     def test_python39_compatible_syntax(self):
         import ast
         for base, _d, names in os.walk(os.path.join(MACOS, "netguard")):

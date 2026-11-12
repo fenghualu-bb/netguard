@@ -651,9 +651,7 @@ struct MaintenanceView: View {
                 Card(title: "断线演练") {
                     HStack {
                         Button("运行自动断线演练（约 1–4 分钟）") {
-                            if confirm("运行断线演练？", "NetGuard 会自己退出 FlClash，断开约 45 秒，验证直连被拦截、约 20 秒后锁定 Claude，然后重新打开 FlClash。期间整机只能访问局域网；3 分钟内网络未恢复会自动执行紧急恢复。
-
-请先保存工作、关闭浏览器和 Claude。演练结束后 Claude 会处于锁定，需要点“解除锁定”。") {
+                            if confirm("运行断线演练？", "NetGuard 会自己退出 FlClash，断开约 45 秒，验证直连被拦截、约 20 秒后锁定 Claude，然后重新打开 FlClash。期间整机只能访问局域网；3 分钟内网络未恢复会自动执行紧急恢复。\n\n请先保存工作、关闭浏览器和 Claude。演练结束后 Claude 会处于锁定，需要点“解除锁定”。") {
                                 model.admin(["drill"]) { ok, text in verifyOutput = text; showResult(ok, text) }
                             }
                         }
