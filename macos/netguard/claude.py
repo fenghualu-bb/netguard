@@ -47,6 +47,18 @@ def find(probes, cfg):
     return found
 
 
+def kill_now(pids):
+    """SIGKILL at once, like Windows Stop-Process -Force: an isolated Claude gets no time to connect."""
+    killed = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            continue
+    return killed
+
+
 def stop(pids, grace=1.5):
     stopped = 0
     for pid in pids:

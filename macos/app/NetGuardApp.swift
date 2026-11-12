@@ -519,7 +519,7 @@ struct RealIpWizard: View {
                 .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             GroupBox("① 隔离 Claude") {
                 HStack {
-                    Text(inMode ? "Claude 已隔离：打开会在半秒内被结束，Anthropic 网段连 TUN 也被拦截。" : "结束 Claude 桌面版和 Claude Code，之后打开也会被结束。")
+                    Text(inMode ? "Claude 已隔离：打开会在约 0.3 秒内被强制结束，Anthropic 网段连 TUN 也被拦截。" : "结束 Claude 桌面版和 Claude Code，之后打开也会被结束。")
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("隔离 Claude") { model.admin(["isolate"]) }.disabled(inMode)

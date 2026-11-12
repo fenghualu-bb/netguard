@@ -24,7 +24,7 @@ from . import VERSION, claude, config, events, notify, paths, pfrules, probes as
 CONFIRM = 2
 INTERVAL = 10
 ENFORCE_EVERY = 2
-ENFORCE_ISOLATED = 0.5  # while Claude is isolated, relaunches are ended within half a second
+ENFORCE_ISOLATED = 0.25  # dedicated thread: a relaunched Claude is ended within about a quarter second
 GRACE_SECONDS = 180
 PENDING_SECONDS = 120
 SHUTDOWN_WINDOW = 600  # a medium-only lockdown this close before boot came from the shutdown
@@ -110,7 +110,29 @@ class Service:
     def kill_claude(self):
         if self._killer:
             return self._killer()
-        return claude.stop(claude.find(self.probes, self.cfg))
+        return claude.kill_now(claude.find(self.probes, self.cfg))
+
+    def enforcer_loop(self, stop, wait=None):
+        """Dedicated thread: ends Claude every ENFORCE_ISOLATED seconds while isolated.
+
+        It never waits for a tick (whose exit probes can take seconds), so a relaunched Claude
+        is ended within about a quarter of a second plus process start-up.
+        """
+        wait = wait or stop.wait
+        while not stop.is_set():
+            try:
+                if self.read_state()["claude_block"]:
+                    self.enforce_isolation()
+            except Exception as exc:
+                util.log("隔离执行出错：%s" % exc, "enforcer")
+            wait(ENFORCE_ISOLATED)
+
+    def start_enforcer(self):
+        import threading
+        stop = threading.Event()
+        thread = threading.Thread(target=self.enforcer_loop, args=(stop,), name="netguard-enforcer", daemon=True)
+        thread.start()
+        return stop, thread
 
     # ------------------------------------------------------------------ pf
     def apply_rules(self, core_gid, state=None):
@@ -487,6 +509,8 @@ class Service:
 
     def watch(self, forever=True):
         prev = None
+        if forever:
+            self.start_enforcer()
         while True:
             start = self.clock()
             if prev and start - prev > 60:

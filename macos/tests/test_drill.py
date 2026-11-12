@@ -61,6 +61,39 @@ def ready(test):
     return svc, pr, clock
 
 
+class EnforcerThreadTests(unittest.TestCase):
+    def test_enforcer_runs_independently_of_a_slow_tick(self):
+        import threading
+        import time as _time
+        svc, pr, clock = ready(self)
+        kills = []
+        svc._killer = lambda: kills.append(_time.monotonic()) or 1
+        svc.isolate(out=lambda *_: None)
+        kills.clear()
+        stop, thread = svc.start_enforcer()
+        _time.sleep(1.0)  # meanwhile the main thread is "busy" (a tick probing the exit)
+        stop.set()
+        thread.join(2)
+        self.assertGreaterEqual(len(kills), 3)
+        gaps = [b - a for a, b in zip(kills, kills[1:])]
+        self.assertLess(max(gaps), 0.6)
+
+    def test_enforcer_idle_when_not_isolated(self):
+        svc, pr, clock = ready(self)
+        kills = []
+        svc._killer = lambda: kills.append(1) or 1
+        import threading
+        stop = threading.Event()
+        calls = {"n": 0}
+
+        def wait(s):
+            calls["n"] += 1
+            if calls["n"] >= 5:
+                stop.set()
+        svc.enforcer_loop(stop, wait=wait)
+        self.assertEqual(kills, [])
+
+
 class DrillTests(unittest.TestCase):
     def test_pass(self):
         svc, pr, clock = ready(self)

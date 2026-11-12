@@ -246,6 +246,32 @@ check "恢复后后台不再加载规则" anchor_empty
 check "恢复后网络可用" net_ok
 
 # ------------------------------------------------------------------------------
+section "6b. 隔离速度（独立线程 + 强制结束）"
+cp /bin/sleep "$WORK/claude"; chmod 755 "$WORK/claude"
+"$ROOT/bin/netguard" isolate
+sleep 1
+TIMES=$(RUNNER="$RUNNER" "$(cat "$ROOT/python-path")" -I - "$WORK/claude" <<'PY'
+import os, subprocess, sys, time
+times = []
+for _ in range(3):
+    t0 = time.monotonic()
+    p = subprocess.Popen(["sudo", "-u", os.environ["RUNNER"], sys.argv[1], "30"])
+    while p.poll() is None and time.monotonic() - t0 < 5:
+        time.sleep(0.02)
+    times.append(round(time.monotonic() - t0, 3))
+    if p.poll() is None:
+        p.kill()
+    time.sleep(0.5)
+print(" ".join(str(t) for t in times))
+PY
+)
+echo "    三次启动到被结束的时间（秒）：$TIMES"
+for t in $TIMES; do
+    check "伪 Claude 在 1 秒内被结束（${t} 秒）" python3 -c "import sys; sys.exit(0 if float('$t') < 1.0 else 1)"
+done
+"$ROOT/bin/netguard" disable >/dev/null   # clears the isolation (unisolate needs a whitelisted exit)
+check "解除隔离后伪 Claude 不再被结束" bash -c "sudo -u $RUNNER $WORK/claude 2 & p=\$!; sleep 1; kill -0 \$p"
+
 section "7. 卸载"
 bash "$ROOT/uninstall.sh" --purge
 check "卸载后没有规则" anchor_empty
