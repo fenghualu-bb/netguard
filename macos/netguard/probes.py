@@ -350,6 +350,21 @@ def find_claude_cli(home, extra_roots=()):
     return sorted(set(found))
 
 
+CG_INTEGRITY_ORIGINAL = "165a1ea4d857e3da7f0e539573396153c2ae962486ea7315de216e5da130f1f9"
+CG_INTEGRITY_PATCHED = "75ab8749ea6bf3f1ccd37471da98b6d5b46d9754a2dd6c4f9fd7aeed79cca70c"
+
+
+def claudeguard_patch_state(home):
+    """NetGuard's ClaudeGuard compatibility patch (macos/patches/claudeguard/apply.sh)."""
+    import hashlib
+    try:
+        with open(os.path.join(home, ".local", "share", "ClaudeGuard", "src", "integrity.py"), "rb") as stream:
+            digest = hashlib.sha256(stream.read()).hexdigest()
+    except OSError:
+        return None
+    return {CG_INTEGRITY_PATCHED: "patched", CG_INTEGRITY_ORIGINAL: "original"}.get(digest, "unknown")
+
+
 def judge_claude_paths(cg_config, home, app_dirs=None, extra_roots=()):
     """Separate "not installed" (nothing to protect) from "installed but ClaudeGuard detached".
 
@@ -377,6 +392,7 @@ def judge_claude_paths(cg_config, home, app_dirs=None, extra_roots=()):
         if os.path.lexists(link):
             links.append({"path": link, "guarded": _is_shim(link)})
     out["cli_links"] = links
+    out["cg_patch"] = claudeguard_patch_state(home)
     if links:
         out["cli_hooked"] = all(l["guarded"] for l in links)
     else:

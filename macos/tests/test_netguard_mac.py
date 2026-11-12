@@ -670,6 +670,36 @@ class ClaudeInstallJudgementTests(unittest.TestCase):
         self.assertEqual(svc.read_guard()["last_findings"], [])
 
 
+class ClaudeGuardPatchTests(unittest.TestCase):
+    def test_patch_state(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            self.assertIsNone(probes.claudeguard_patch_state(home))
+            src = os.path.join(home, ".local", "share", "ClaudeGuard", "src")
+            os.makedirs(src)
+            with open(os.path.join(src, "integrity.py"), "w") as stream:
+                stream.write("something else")
+            self.assertEqual(probes.claudeguard_patch_state(home), "unknown")
+
+    def test_finding_points_to_patch_until_applied(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.cg.update({"cli_path_ok": False, "cli_installed": ["/Users/jim/.local/share/claude/versions/2.1.322"],
+                      "cg_patch": "original"})
+        svc.tick()
+        self.assertTrue(any("claudeguard-patch" in x for x in svc.read_guard()["last_findings"]))
+        pr.cg["cg_patch"] = "patched"
+        svc.tick()
+        self.assertFalse(any("claudeguard-patch" in x for x in svc.read_guard()["last_findings"]))
+
+    def test_patch_script_is_hash_guarded(self):
+        with open(os.path.join(MACOS, "patches", "claudeguard", "apply.sh"), encoding="utf-8") as stream:
+            text = stream.read()
+        self.assertIn(probes.CG_INTEGRITY_ORIGINAL, text)
+        self.assertIn(probes.CG_INTEGRITY_PATCHED, text)
+        self.assertIn("拒绝修改", text)
+
+
 class ConfigMigrationTests(unittest.TestCase):
     def test_v1_false_becomes_auto(self):
         data, changes = config.migrate({"whitelist": ["203.0.113.10"], "block_lan_dns": False})
@@ -911,7 +941,7 @@ class SafetyStaticTests(unittest.TestCase):
         if not bash:
             self.skipTest("bash not available")
         for rel in ("install.sh", "uninstall.sh", "bin/netguard", "bin/netguard-boot", "bin/netguard-recover",
-                    "scripts/recover.command", "ci/integration.sh"):
+                    "scripts/recover.command", "ci/integration.sh", "patches/claudeguard/apply.sh"):
             path = os.path.join(MACOS, rel)
             if not os.path.exists(path):
                 continue

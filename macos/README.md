@@ -74,6 +74,8 @@ cd ~/ClaudeGuard && git checkout 61b61e1   # 2026-11-08 的版本；升级前先
 ```
 安装时它会问是否把当前 IP 加入白名单：**只有在代理已连上时**才回答“是”。
 
+> ClaudeGuard 61b61e1 找不到新版官方原生 Claude Code（每个版本是 `~/.local/share/claude/versions/<版本号>` 这样的单个文件），`claudeguard doctor` 会显示 `Hands off to: NOT FOUND`，`claude` 命令无法启动。NetGuard 的 `install.sh` 会自动打一个**只加一行搜索路径**的兼容补丁：打补丁前后都校验文件哈希，文件不是这个版本就拒绝修改，并保留备份；也可以用 `--revert` 还原。重装 ClaudeGuard 后，在工作台维护页点“修复 ClaudeGuard”即可重新打上。
+
 **3. 获取本仓库**（私有仓库，需要先登录 GitHub）
 
 ```bash

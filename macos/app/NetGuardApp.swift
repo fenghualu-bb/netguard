@@ -60,6 +60,7 @@ struct NGClaudeGuard: Decodable {
     var cli_path_ok: Bool?
     var app_installed: [String]?
     var cli_installed: [String]?
+    var cg_patch: String?
 }
 
 struct NGObs: Decodable {
@@ -302,12 +303,13 @@ final class Model: ObservableObject {
         return nil
     }
 
+    /// Applies NetGuard's hash-checked ClaudeGuard compatibility patch, then `claudeguard doctor`.
     func repairClaudeGuard() {
-        guard let cg = claudeguardCLI else {
+        guard claudeguardCLI != nil else {
             showResult(false, "没有找到 claudeguard 命令（~/.local/bin/claudeguard）。请按 README 第 2 步安装 ClaudeGuard。")
             return
         }
-        runProcess(cg, ["doctor"])
+        runProcess("/bin/bash", ["/Library/NetGuard/bin/claudeguard-patch"])
     }
 
     func update() {
@@ -443,8 +445,10 @@ struct OverviewView: View {
                                  ok: cg?.cli_hooked == nil ? nil : cg?.cli_hooked == true)
                             Line(label: "桌面版", value: cg?.app_path_ok == nil ? "未安装（不适用）" : ((cg?.app_installed ?? []).joined(separator: "、") + (cg?.app_path_ok == true ? "，ClaudeGuard 已跟上" : "，ClaudeGuard 记录过期")),
                                  ok: cg?.app_path_ok)
-                            Line(label: "Claude Code", value: cg?.cli_path_ok == nil ? "未安装（不适用）" : (cg?.cli_path_ok == true ? "ClaudeGuard 已跟上" : "ClaudeGuard 记录过期"),
+                            Line(label: "Claude Code", value: cg?.cli_path_ok == nil ? "未安装（不适用）" : (cg?.cli_path_ok == true ? "ClaudeGuard 已跟上" : "ClaudeGuard 记录过期（维护页“修复 ClaudeGuard”）"),
                                  ok: cg?.cli_path_ok)
+                            Line(label: "兼容补丁", value: cg?.cg_patch == "patched" ? "已应用（识别新版原生 Claude Code）" : (cg?.cg_patch == "original" ? "未应用" : (cg?.cg_patch == nil ? "—" : "未知版本")),
+                                 ok: cg?.cg_patch == nil ? nil : cg?.cg_patch == "patched")
                         }
                         Card(title: "FlClash") {
                             Line(label: "进程", value: "界面 \(o?.flclash_ui == true ? "✓" : "✗") / 内核 \(o?.core?.running == true ? "✓" : "✗")",
@@ -646,9 +650,9 @@ struct MaintenanceView: View {
                 }
                 Card(title: "ClaudeGuard") {
                     HStack {
-                        Button("修复 ClaudeGuard（claudeguard doctor）") { model.repairClaudeGuard() }
+                        Button("修复 ClaudeGuard（兼容补丁 + doctor）") { model.repairClaudeGuard() }
                     }
-                    Text("重新挂上 claude 命令和桌面版的钩子；Claude 更新后若显示“钩子未经过 ClaudeGuard”时使用。")
+                    Text("先应用 NetGuard 的 ClaudeGuard 兼容补丁（校验哈希，只改一行），再运行 claudeguard doctor 重新挂上 claude 命令和桌面版；Claude 更新后显示“记录过期”时使用。")
                         .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Card(title: "安装与更新") {

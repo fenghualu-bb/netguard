@@ -97,6 +97,14 @@ COMMIT="$(sudo -u "$USER_NAME" git -C "$REPO" rev-parse --short HEAD 2>/dev/null
     "$REPO" "$COMMIT" "$USER_NAME" "$(date '+%Y-%m-%d %H:%M')" "$ROOT/source.json"
 chown root:wheel "$ROOT/source.json"; chmod 644 "$ROOT/source.json"
 
+install -o root -g wheel -m 755 "$SRC/patches/claudeguard/apply.sh" "$ROOT/bin/claudeguard-patch"
+CG_INTEGRITY="$USER_HOME/.local/share/ClaudeGuard/src/integrity.py"
+if [ -f "$CG_INTEGRITY" ]; then
+    say "ClaudeGuard 兼容补丁（识别新版原生 Claude Code，只改一行搜索路径，校验前后哈希）"
+    sudo -u "$USER_NAME" -H bash "$SRC/patches/claudeguard/apply.sh" || \
+        warn "ClaudeGuard 补丁未应用（见上方原因）；Claude Code 原生安装可能无法经过 ClaudeGuard 启动。"
+fi
+
 say "注册后台 ${LABEL}（开机自启，每 10 秒检查一次）"
 install -o root -g wheel -m 644 "$SRC/launchd/$LABEL.plist" "$PLIST"
 plutil -lint "$PLIST" >/dev/null

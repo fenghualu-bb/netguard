@@ -257,8 +257,9 @@ class Service:
                     loose = [l["path"] for l in cg.get("cli_links") or [] if not l["guarded"]]
                     broken.append("claude 命令没有经过 ClaudeGuard" + ("（%s）" % "、".join(loose) if loose else "（缺少钩子）"))
                 if cg.get("cli_path_ok") is False:
-                    broken.append("Claude Code 已安装（%s），但 ClaudeGuard 记录的路径已失效"
-                                  % "、".join(cg.get("cli_installed") or [])[:160])
+                    hint = "" if cg.get("cg_patch") == "patched" else                         "（ClaudeGuard 61b61e1 不识别新版原生安装，运行 /Library/NetGuard/bin/claudeguard-patch 修复）"
+                    broken.append("Claude Code 已安装（%s），但 ClaudeGuard 记录的路径已失效%s"
+                                  % ("、".join(cg.get("cli_installed") or [])[:160], hint))
                 if cg.get("app_path_ok") is False:
                     broken.append("Claude 桌面版已安装（%s），但 ClaudeGuard 记录的是 %s"
                                   % ("、".join(cg.get("app_installed") or []), cg.get("app_path")))
@@ -779,6 +780,8 @@ class Service:
                 "状态 %s，%s 秒前更新" % (cg.get("state"), cg.get("age")))
             row(cg.get("protection_enabled") is not False, "ClaudeGuard 保护开启")
             row(cg.get("helper_loaded") is True, "ClaudeGuard root 网络助手在运行")
+            out("ℹ️ ClaudeGuard 兼容补丁：%s" % {"patched": "已应用", "original": "未应用（原版 61b61e1）",
+                                               "unknown": "未知版本（ClaudeGuard 可能已升级）"}.get(cg.get("cg_patch"), "—"))
             row(cg.get("cli_hooked") is not False, "claude 命令经过 ClaudeGuard",
                 "、".join(l["path"] for l in cg.get("cli_links") or []) or "未安装 Claude Code（不适用）")
             def installed(key, ok_key):

@@ -41,6 +41,31 @@ jobs:
             echo "--- dns_block=$1 isolate=$2"; cat /tmp/rules.conf
             sudo /sbin/pfctl -n -a 'com.apple/zz.NetGuard' -f /tmp/rules.conf
           done
+      - name: ClaudeGuard compatibility patch against the pinned upstream file
+        run: |
+          set -e
+          FAKE=$(mktemp -d)
+          mkdir -p "$FAKE/.local/share/ClaudeGuard/src" "$FAKE/.local/share/claude/versions"
+          curl -fsSL https://raw.githubusercontent.com/ivblz/ClaudeGuard/61b61e11a4e05d86a75213abecceb13d80e8acbf/src/integrity.py -o "$FAKE/.local/share/ClaudeGuard/src/integrity.py"
+          [ "$(HOME=$FAKE bash macos/patches/claudeguard/apply.sh --check)" = original ]
+          HOME=$FAKE bash macos/patches/claudeguard/apply.sh
+          [ "$(HOME=$FAKE bash macos/patches/claudeguard/apply.sh --check)" = patched ]
+          HOME=$FAKE bash macos/patches/claudeguard/apply.sh   # idempotent
+          echo '#!/bin/sh' > "$FAKE/.local/share/claude/versions/2.1.322"
+          chmod +x "$FAKE/.local/share/claude/versions/2.1.322"
+          HOME=$FAKE /usr/bin/python3 -c "
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location('integrity', sys.argv[1])
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          found = m.discover_real_cli()
+          print('discovered:', found)
+          assert found and found.endswith('/versions/2.1.322'), found" "$FAKE/.local/share/ClaudeGuard/src/integrity.py"
+          HOME=$FAKE bash macos/patches/claudeguard/apply.sh --revert
+          [ "$(HOME=$FAKE bash macos/patches/claudeguard/apply.sh --check)" = original ]
+          HOME=$FAKE /usr/bin/python3 -c "
+          import sys; sys.path.insert(0, 'macos')
+          from netguard import probes
+          print(probes.claudeguard_patch_state(sys.argv[1]))" "$FAKE"
       - name: Build menu bar app
         run: |
           xcrun swiftc -O -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" \

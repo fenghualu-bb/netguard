@@ -18,7 +18,12 @@ stop only at the few points listed under "When to involve the user".
    in `/etc/hosts` and its own pf anchor `com.claudeguard` (it never reloads the main ruleset or edits
    `/etc/pf.conf`; see its README "Coexisting with other PF users"). FlClash managing its TUN/DNS is likewise
    allowed. Verify afterwards: `/etc/pf.conf` hash unchanged, `/etc/hosts` changed only inside the
-   ClaudeGuard markers, `pfctl -sr` only gained ClaudeGuard's anchor call. Do not edit their code.
+   ClaudeGuard markers, `pfctl -sr` only gained ClaudeGuard's anchor call. Do not edit their code by
+   hand. The single exception is NetGuard's hash-checked compatibility patch
+   (`macos/patches/claudeguard/apply.sh`, installed as `/Library/NetGuard/bin/claudeguard-patch`, run as
+   the desktop user, never with sudo): ClaudeGuard 61b61e1 cannot find the native Claude Code installer's
+   flat `~/.local/share/claude/versions/<version>` files ("Hands off to: NOT FOUND"). `install.sh` applies
+   it automatically; re-run it after reinstalling ClaudeGuard, then `claudeguard doctor`.
 4. Never use `disable`, `guard-off`, `recover`, DIRECT mode, a wider whitelist or a longer grace period to
    make a failure disappear. Diagnose read-only first (`netguard status`, `netguard events -n 50`,
    `/Library/NetGuard/netguard.log`). Lift a lockdown only with `netguard release`.
