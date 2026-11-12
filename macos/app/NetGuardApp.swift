@@ -58,6 +58,8 @@ struct NGClaudeGuard: Decodable {
     var app_path: String?
     var app_path_ok: Bool?
     var cli_path_ok: Bool?
+    var app_installed: [String]?
+    var cli_installed: [String]?
 }
 
 struct NGObs: Decodable {
@@ -437,9 +439,12 @@ struct OverviewView: View {
                                  ok: cg?.fresh == true && cg?.protection_enabled != false)
                             Line(label: "出口判定", value: "\(cg?.state ?? "?")  \(cg?.ip ?? "")", ok: cg?.state == "allowed")
                             Line(label: "网络助手", value: cg?.helper_loaded == true ? "运行中" : "未运行", ok: cg?.helper_loaded == true)
-                            Line(label: "Claude 钩子", value: cg?.cli_hooked == true ? "claude 命令经过 ClaudeGuard" : "claude 命令未经过 ClaudeGuard",
-                                 ok: cg?.cli_hooked == true)
-                            Line(label: "桌面版路径", value: cg?.app_path ?? "未记录", ok: cg?.app_path_ok != false && cg?.cli_path_ok != false)
+                            Line(label: "Claude 钩子", value: cg?.cli_hooked == nil ? "未安装 Claude Code（不适用）" : (cg?.cli_hooked == true ? "claude 命令经过 ClaudeGuard" : "claude 命令未经过 ClaudeGuard"),
+                                 ok: cg?.cli_hooked == nil ? nil : cg?.cli_hooked == true)
+                            Line(label: "桌面版", value: cg?.app_path_ok == nil ? "未安装（不适用）" : ((cg?.app_installed ?? []).joined(separator: "、") + (cg?.app_path_ok == true ? "，ClaudeGuard 已跟上" : "，ClaudeGuard 记录过期")),
+                                 ok: cg?.app_path_ok)
+                            Line(label: "Claude Code", value: cg?.cli_path_ok == nil ? "未安装（不适用）" : (cg?.cli_path_ok == true ? "ClaudeGuard 已跟上" : "ClaudeGuard 记录过期"),
+                                 ok: cg?.cli_path_ok)
                         }
                         Card(title: "FlClash") {
                             Line(label: "进程", value: "界面 \(o?.flclash_ui == true ? "✓" : "✗") / 内核 \(o?.core?.running == true ? "✓" : "✗")",

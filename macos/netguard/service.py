@@ -257,9 +257,11 @@ class Service:
                     loose = [l["path"] for l in cg.get("cli_links") or [] if not l["guarded"]]
                     broken.append("claude 命令没有经过 ClaudeGuard" + ("（%s）" % "、".join(loose) if loose else "（缺少钩子）"))
                 if cg.get("cli_path_ok") is False:
-                    broken.append("ClaudeGuard 记录的 Claude Code 路径已失效")
+                    broken.append("Claude Code 已安装（%s），但 ClaudeGuard 记录的路径已失效"
+                                  % "、".join(cg.get("cli_installed") or [])[:160])
                 if cg.get("app_path_ok") is False:
-                    broken.append("ClaudeGuard 记录的 Claude 桌面版路径已失效")
+                    broken.append("Claude 桌面版已安装（%s），但 ClaudeGuard 记录的是 %s"
+                                  % ("、".join(cg.get("app_installed") or []), cg.get("app_path")))
                 if broken:
                     f.append(events.finding("claude_path", "；".join(broken)))
         return f, obs
@@ -777,10 +779,15 @@ class Service:
                 "状态 %s，%s 秒前更新" % (cg.get("state"), cg.get("age")))
             row(cg.get("protection_enabled") is not False, "ClaudeGuard 保护开启")
             row(cg.get("helper_loaded") is True, "ClaudeGuard root 网络助手在运行")
-            row(cg.get("cli_hooked") is True, "claude 命令经过 ClaudeGuard",
-                "、".join(l["path"] for l in cg.get("cli_links") or []))
+            row(cg.get("cli_hooked") is not False, "claude 命令经过 ClaudeGuard",
+                "、".join(l["path"] for l in cg.get("cli_links") or []) or "未安装 Claude Code（不适用）")
+            def installed(key, ok_key):
+                if cg.get(ok_key) is None:
+                    return "未安装（不适用）"
+                return "、".join(cg.get(key) or [])
             row(cg.get("app_path_ok") is not False and cg.get("cli_path_ok") is not False,
-                "ClaudeGuard 记录的 Claude 路径有效", str(cg.get("app_path")))
+                "ClaudeGuard 跟上了已安装的 Claude", "桌面版：%s；Claude Code：%s" % (
+                    installed("app_installed", "app_path_ok"), installed("cli_installed", "cli_path_ok")))
         guard = self.read_guard()
         row(not guard["lockdown"], "没有自动防护锁定", "；".join(guard.get("reasons") or []))
         out("界面绿色只表示当前检查通过；真实停代理、睡眠唤醒、切换网络需另行验收（见 macos/ACCEPTANCE.md）。")

@@ -12,7 +12,10 @@ from . import paths, util
 ANTHROPIC_V4 = ["160.79.104.0/23", "153.61.224.0/22"]
 ANTHROPIC_V6 = ["2607:6bc0::/48"]
 
+CONFIG_VERSION = 2
+
 DEFAULTS = {
+    "config_version": CONFIG_VERSION,
     "whitelist": [],
     "check_url": "https://www.cloudflare.com/cdn-cgi/trace",
     "claude_check_url": "https://claude.ai/cdn-cgi/trace",
@@ -83,6 +86,10 @@ def validate(data):
         raise ConfigError("claude_app_paths 必须是 .app 绝对路径")
     for key in ("require_claudeguard", "require_global_mode"):
         cfg[key] = bool(cfg[key])
+    try:
+        cfg["config_version"] = int(cfg["config_version"])
+    except (TypeError, ValueError):
+        raise ConfigError("config_version 必须是整数")
     if cfg["block_lan_dns"] not in (True, False, "auto"):
         raise ConfigError('block_lan_dns 只能是 true、false 或 "auto"')
     targets = []
@@ -122,6 +129,26 @@ def ip_in_whitelist(ip, whitelist):
         except ValueError:
             continue
     return False
+
+
+def migrate(data):
+    """Upgrade a config written by an older installer. Returns (data, list of changes).
+
+    Version 1 (no config_version) wrote every default into config.json, including the old
+    default block_lan_dns=false, so that value says nothing about the user's choice: it moves
+    to the new default "auto" (which still never leaves the Mac without DNS).
+    """
+    changes = []
+    if not isinstance(data, dict):
+        return data, changes
+    data = dict(data)
+    if "config_version" not in data:
+        if data.get("block_lan_dns") is False:
+            data["block_lan_dns"] = "auto"
+            changes.append('block_lan_dns: false（旧版默认）→ "auto"')
+        data["config_version"] = CONFIG_VERSION
+        changes.append("config_version → %d" % CONFIG_VERSION)
+    return data, changes
 
 
 def load(path=None):

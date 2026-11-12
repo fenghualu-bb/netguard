@@ -104,8 +104,15 @@ def main(argv=None):
             print("需要 sudo", file=sys.stderr)
             return 2
         if os.path.exists(paths.CONFIG):
-            config.load()  # validates the kept configuration
-            print("保留现有配置 %s" % paths.CONFIG)
+            raw = util.read_json(paths.CONFIG, None)
+            migrated, changes = config.migrate(raw)
+            if changes:
+                util.write_text(paths.CONFIG + ".bak-v1", json.dumps(raw, ensure_ascii=False, indent=2) + "\n")
+                config.save(migrated)
+                print("已升级配置（旧文件备份为 config.json.bak-v1）：" + "；".join(changes))
+            else:
+                config.load()  # validates the kept configuration
+                print("保留现有配置 %s" % paths.CONFIG)
             return 0
         cfg = config.validate({})
         user = os.environ.get("NETGUARD_INSTALL_USER") or ""

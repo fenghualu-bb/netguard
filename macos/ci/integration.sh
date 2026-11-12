@@ -74,9 +74,18 @@ check "安装没有加载任何断网规则" anchor_empty
 check "安装后网络可用" net_ok
 check "代码目录 root 所有、他人不可写" bash -c "[ \"\$(stat -f '%Su %Sp' $ROOT/lib/netguard/service.py)\" = 'root -rw-r--r--' ]"
 check "普通用户能读 status" sudo -u "$RUNNER" /Library/NetGuard/bin/netguard status
+echo "  -- 模拟旧版（v1）配置：block_lan_dns=false 且没有 config_version"
+py "
+import json
+d = json.load(open('$ROOT/config.json'))
+d.pop('config_version', None); d['block_lan_dns'] = False
+json.dump(d, open('$ROOT/config.json', 'w'))"
 echo "  -- 以管理员密码框方式（无 SUDO_USER）再次运行安装＝升级路径"
 if env -u SUDO_USER bash "$MACOS/install.sh" --ci >/tmp/ngci-reinstall.log 2>&1; then ok "无 SUDO_USER 时安装/升级成功"; else bad "无 SUDO_USER 时安装失败"; tail -n 20 /tmp/ngci-reinstall.log; fi
 check "升级后保留备份" bash -c "ls -d $ROOT/backup-* >/dev/null 2>&1"
+check "旧版配置已迁移为 block_lan_dns=auto" grep -q '"block_lan_dns": "auto"' "$ROOT/config.json"
+check "迁移前的配置已备份" test -f "$ROOT/config.json.bak-v1"
+check "开机脚本不再把 pfctl 提示写进日志" bash -c "! grep -q 'could result in flushing' $ROOT/netguard.log"
 check "升级没有加载断网规则" anchor_empty
 check "菜单栏 LaunchAgent 属于桌面用户" bash -c "[ \"\$(stat -f %Su /Users/$RUNNER/Library/LaunchAgents/com.netguard.menu.plist)\" = '$RUNNER' ]"
 

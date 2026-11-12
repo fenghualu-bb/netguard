@@ -11,10 +11,11 @@ stamp() { /bin/date '+%Y-%m-%d %H:%M:%S'; }
 if [ -f "$ROOT/state.json" ] && /usr/bin/grep -q '"killswitch": true' "$ROOT/state.json" \
         && [ -f "$ROOT/anchor.rules" ]; then
     if ! /sbin/pfctl -a "$ANCHOR" -sr 2>/dev/null | /usr/bin/grep -q 'ng_block_all'; then
-        if /sbin/pfctl -a "$ANCHOR" -f "$ROOT/anchor.rules" 2>>"$LOG"; then
+        # pfctl prints a generic "-f could flush rules" notice even for an anchor; log it only on failure.
+        if err=$(/sbin/pfctl -a "$ANCHOR" -f "$ROOT/anchor.rules" 2>&1); then
             echo "$(stamp) [boot] 已在 Python 启动前重新加载断网保护规则" >> "$LOG"
         else
-            echo "$(stamp) [boot] 重新加载断网保护规则失败（watch 会重试）" >> "$LOG"
+            echo "$(stamp) [boot] 重新加载断网保护规则失败（watch 会重试）：$err" >> "$LOG"
         fi
     fi
     token=$(/bin/cat "$ROOT/pf-token" 2>/dev/null)

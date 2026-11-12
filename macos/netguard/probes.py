@@ -293,20 +293,92 @@ class Probes:
         info["helper_loaded"] = self.runner([paths.LAUNCHCTL, "print", "system/com.claudeguard.helper"],
                                             timeout=10).returncode == 0
         cfg = util.read_json(os.path.join(home, ".config", "claudeguard", "config.json"), {}) or {}
-        app = cfg.get("real_claude_app_path") if isinstance(cfg, dict) else None
-        cli = cfg.get("real_claude_cli_path") if isinstance(cfg, dict) else None
-        info["app_path"] = app
-        info["app_path_ok"] = bool(app and os.path.isdir(app)) if app else None
-        info["cli_path_ok"] = bool(cli and os.path.isfile(os.path.realpath(cli))) if cli else None
-        # Same rule as ClaudeGuard's own `doctor`: every `claude` in these directories must be
-        # ClaudeGuard's shim, otherwise typing `claude` bypasses the pre-flight check.
-        links = []
-        for directory in (os.path.join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"):
-            link = os.path.join(directory, "claude")
-            if os.path.lexists(link):
-                real = os.path.realpath(link)
-                ours = os.path.basename(real) == "cli_wrapper.py" or "/ClaudeGuard/" in real
-                links.append({"path": link, "guarded": ours})
-        info["cli_links"] = links
-        info["cli_hooked"] = bool(links) and all(l["guarded"] for l in links)
+        info.update(judge_claude_paths(cfg if isinstance(cfg, dict) else {}, home))
         return info
+
+
+def _is_shim(path):
+    real = os.path.realpath(path)
+    return os.path.basename(real) == "cli_wrapper.py" or "/ClaudeGuard/" in real
+
+
+def find_claude_apps(home, app_dirs=None):
+    """Installed Claude Desktop bundles (bundle id prefix com.anthropic.claude, as ClaudeGuard does)."""
+    import plistlib
+    found = []
+    for base in app_dirs or ("/Applications", os.path.join(home, "Applications")):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".app") or "claudeguard" in name.lower():
+                continue
+            app = os.path.join(base, name)
+            try:
+                with open(os.path.join(app, "Contents", "Info.plist"), "rb") as stream:
+                    bundle = str(plistlib.load(stream).get("CFBundleIdentifier", ""))
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                continue
+            if bundle.startswith("com.anthropic.claude"):
+                found.append(app)
+    return sorted(found)
+
+
+def find_claude_cli(home, extra_roots=()):
+    """Real Claude Code installations (native, Homebrew cask, npm), never ClaudeGuard's shim."""
+    found = []
+    versions = os.path.join(home, ".local", "share", "claude", "versions")
+    try:
+        found += [os.path.join(versions, v) for v in os.listdir(versions)
+                  if os.path.isfile(os.path.join(versions, v))]
+    except OSError:
+        pass
+    candidates = [os.path.join(home, ".claude", "local", "claude")]
+    for prefix in ("/opt/homebrew", "/usr/local", os.path.join(home, ".npm-global")) + tuple(extra_roots):
+        candidates.append(os.path.join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js"))
+        candidates.append(os.path.join(prefix, "bin", "claude"))
+        cask = os.path.join(prefix, "Caskroom", "claude-code")
+        try:
+            for v in os.listdir(cask):
+                candidates.append(os.path.join(cask, v, "claude"))
+        except OSError:
+            pass
+    for path in candidates:
+        if os.path.isfile(path) and not _is_shim(path):
+            found.append(path)
+    return sorted(set(found))
+
+
+def judge_claude_paths(cg_config, home, app_dirs=None, extra_roots=()):
+    """Separate "not installed" (nothing to protect) from "installed but ClaudeGuard detached".
+
+    True = ok, False = installed but ClaudeGuard's record/hook is stale (claude_path finding),
+    None = that Claude program is not installed on this Mac.
+    """
+    apps = find_claude_apps(home, app_dirs)
+    clis = find_claude_cli(home, extra_roots)
+    app = cg_config.get("real_claude_app_path")
+    cli = cg_config.get("real_claude_cli_path")
+    out = {"app_path": app, "app_installed": apps, "cli_installed": clis}
+    if not apps:
+        out["app_path_ok"] = None
+    else:
+        out["app_path_ok"] = bool(app) and os.path.realpath(app) in [os.path.realpath(a) for a in apps]
+    if not clis:
+        out["cli_path_ok"] = None
+    else:
+        out["cli_path_ok"] = bool(cli) and os.path.isfile(os.path.realpath(cli)) and not _is_shim(cli)
+    # Same rule as ClaudeGuard's own `doctor`: every `claude` in these directories must be
+    # ClaudeGuard's shim, otherwise typing `claude` bypasses the pre-flight check.
+    links = []
+    for directory in (os.path.join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"):
+        link = os.path.join(directory, "claude")
+        if os.path.lexists(link):
+            links.append({"path": link, "guarded": _is_shim(link)})
+    out["cli_links"] = links
+    if links:
+        out["cli_hooked"] = all(l["guarded"] for l in links)
+    else:
+        out["cli_hooked"] = False if clis else None  # no shim matters only when Claude Code exists
+    return out

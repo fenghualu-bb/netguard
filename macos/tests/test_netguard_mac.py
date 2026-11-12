@@ -583,6 +583,111 @@ class NewFindingTests(unittest.TestCase):
         self.assertEqual(st["observations"]["flclash"]["mode"], "global")
 
 
+class ClaudeInstallJudgementTests(unittest.TestCase):
+    """Issue #1: Claude not installed must be "not applicable", not a high claude_path lockdown."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = os.path.join(tmp.name, "Users", "jim")
+        self.apps = os.path.join(tmp.name, "Applications")
+        os.makedirs(self.home)
+        os.makedirs(self.apps)
+        self.default_cfg = {"real_claude_cli_path": "/opt/homebrew/bin/claude",
+                            "real_claude_app_path": "/Applications/Claude.app"}
+
+    def judge(self, cfg):
+        return probes.judge_claude_paths(cfg, self.home, app_dirs=[self.apps])
+
+    def make_app(self, name="Claude.app", bundle="com.anthropic.claudefordesktop"):
+        import plistlib
+        path = os.path.join(self.apps, name)
+        os.makedirs(os.path.join(path, "Contents"))
+        with open(os.path.join(path, "Contents", "Info.plist"), "wb") as stream:
+            plistlib.dump({"CFBundleIdentifier": bundle}, stream)
+        return path
+
+    def make_cli(self, version="2.1.0"):
+        d = os.path.join(self.home, ".local", "share", "claude", "versions")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, version)
+        open(path, "w").close()
+        return path
+
+    def test_nothing_installed_is_not_applicable(self):
+        out = self.judge(self.default_cfg)
+        self.assertIsNone(out["app_path_ok"])
+        self.assertIsNone(out["cli_path_ok"])
+        self.assertIsNone(out["cli_hooked"])
+        self.assertEqual(out["app_installed"], [])
+
+    def test_installed_and_recorded(self):
+        app = self.make_app()
+        cli = self.make_cli()
+        out = self.judge({"real_claude_app_path": app, "real_claude_cli_path": cli})
+        self.assertTrue(out["app_path_ok"])
+        self.assertTrue(out["cli_path_ok"])
+
+    def test_installed_but_record_stale(self):
+        self.make_app()
+        self.make_cli("2.2.0")
+        out = self.judge({"real_claude_app_path": "/Applications/Old.app",
+                          "real_claude_cli_path": os.path.join(self.home, ".local/share/claude/versions/2.1.0")})
+        self.assertIs(out["app_path_ok"], False)
+        self.assertIs(out["cli_path_ok"], False)
+        self.assertIs(out["cli_hooked"], False)  # Claude Code exists but no shim at all
+
+    def test_other_apps_ignored(self):
+        self.make_app("Notes.app", bundle="com.apple.Notes")
+        self.make_app("ClaudeGuard.app", bundle="com.claudeguard.app")
+        self.assertIsNone(self.judge(self.default_cfg)["app_path_ok"])
+
+    def test_shim_alone_is_fine(self):
+        bindir = os.path.join(self.home, ".local", "bin")
+        target_dir = os.path.join(self.home, ".local", "share", "ClaudeGuard", "src")
+        os.makedirs(bindir)
+        os.makedirs(target_dir)
+        target = os.path.join(target_dir, "cli_wrapper.py")
+        open(target, "w").close()
+        try:
+            os.symlink(target, os.path.join(bindir, "claude"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not available on this host")
+        out = self.judge(self.default_cfg)
+        self.assertTrue(out["cli_hooked"])
+        self.assertIsNone(out["cli_path_ok"])
+
+    def test_issue1_scenario_never_locks(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.cg.update({"app_path_ok": None, "cli_path_ok": None, "cli_hooked": True,
+                      "app_installed": [], "cli_installed": []})
+        for _ in range(15):
+            svc.tick()
+            clock.advance(10)
+        self.assertFalse(svc.read_guard()["lockdown"])
+        self.assertEqual(svc.read_guard()["last_findings"], [])
+
+
+class ConfigMigrationTests(unittest.TestCase):
+    def test_v1_false_becomes_auto(self):
+        data, changes = config.migrate({"whitelist": ["203.0.113.10"], "block_lan_dns": False})
+        self.assertEqual(data["block_lan_dns"], "auto")
+        self.assertEqual(data["config_version"], config.CONFIG_VERSION)
+        self.assertTrue(changes)
+        self.assertEqual(config.validate(data)["whitelist"], ["203.0.113.10"])
+
+    def test_v1_true_kept(self):
+        data, _ = config.migrate({"block_lan_dns": True})
+        self.assertIs(data["block_lan_dns"], True)
+
+    def test_v2_untouched(self):
+        data, changes = config.migrate({"config_version": 2, "block_lan_dns": False})
+        self.assertIs(data["block_lan_dns"], False)
+        self.assertEqual(changes, [])
+
+
 class ShutdownLockTests(unittest.TestCase):
     """FlClash quits before the root daemon at shutdown; that lockdown must not need a manual release."""
 
