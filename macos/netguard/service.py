@@ -26,10 +26,11 @@ INTERVAL = 10
 ENFORCE_EVERY = 2
 GRACE_SECONDS = 180
 PENDING_SECONDS = 120
+SHUTDOWN_WINDOW = 600  # a medium-only lockdown this close before boot came from the shutdown
 
 STATE_DEFAULTS = {"killswitch": False, "claude_block": False, "core_uid": 0, "core_gid": None,
                   "rules_fp": None, "pending": None}
-GUARD_DEFAULTS = {"enabled": True, "lockdown": False, "since": 0, "reasons": [], "bad_streak": 0,
+GUARD_DEFAULTS = {"enabled": True, "lockdown": False, "since": 0, "reasons": [], "reason_codes": [], "bad_streak": 0,
                   "last_check": 0, "last_findings": [], "triggers": 0, "grace_until": 0,
                   "grace_noted": 0, "observations": {}}
 
@@ -259,6 +260,8 @@ class Service:
                 self.write_guard(guard)
                 return guard
             if guard["lockdown"]:
+                if self.shutdown_artifact(guard):
+                    self.try_boot_release(state, guard, integ)
                 self.write_guard(guard)
                 return guard
             if grace["active"]:
@@ -287,6 +290,7 @@ class Service:
                 guard["lockdown"] = True
                 guard["since"] = int(self.clock())
                 guard["reasons"] = [x["text"] for x in findings]
+                guard["reason_codes"] = sorted(set(x["key"] for x in findings))
                 guard["triggers"] = int(guard["triggers"]) + 1
                 state["claude_block"] = True
                 self.write_state(state)
@@ -298,6 +302,36 @@ class Service:
                             "。恢复后在 NetGuard 工作台点“解除锁定”。", key="trigger", every=60)
             self.write_guard(guard)
             return guard
+
+    def shutdown_artifact(self, guard):
+        """A lockdown caused only by medium findings in the minutes before this boot.
+
+        At shutdown/restart macOS quits FlClash and ClaudeGuard before stopping the root
+        daemon, so the watch sees "core/TUN/ClaudeGuard not running" twice and locks. The
+        kill switch was intact (otherwise a high `killswitch` finding would be in the codes),
+        so nothing leaked. Such a lockdown may be lifted after boot, but only through the
+        same full checks as a manual `release`.
+        """
+        codes = guard.get("reason_codes") or []
+        if not codes or any(events.RISK.get(c, ("高",))[0] == "高" for c in codes):
+            return False
+        boot = float(self.probes.boot_time() or 0)
+        since = float(guard.get("since") or 0)
+        return boot > 0 and since > 0 and 0 <= boot - since <= SHUTDOWN_WINDOW
+
+    def try_boot_release(self, state, guard, integ):
+        if not state["killswitch"]:
+            return False
+        findings, _ = self.observe(state, integ, require=True)
+        if findings:
+            return False  # keep locked; retried every tick until everything is ready
+        state["claude_block"] = False
+        self.write_state(state)
+        guard.update({"lockdown": False, "bad_streak": 0, "reasons": [], "reason_codes": []})
+        events.add("release", "开机后自动解除：锁定发生在关机过程中（代理先于 NetGuard 退出，仅中危），"
+                              "开机后全部检查通过，Claude 可以使用")
+        util.log("开机后自动解除关机过程中产生的锁定", "watch")
+        return True
 
     def enforce_isolation(self):
         state = self.read_state()
@@ -471,7 +505,7 @@ class Service:
                 raise UserError("仍有异常，保持锁定：" + "；".join(x["text"] for x in findings))
             state["claude_block"] = False
             self.write_state(state)
-            guard.update({"lockdown": False, "bad_streak": 0, "reasons": []})
+            guard.update({"lockdown": False, "bad_streak": 0, "reasons": [], "reason_codes": []})
             self.write_guard(guard)
             events.add("release", "检查全部通过，已解除锁定，Claude 可以重新打开")
         util.log("已解除自动防护锁定", "release")

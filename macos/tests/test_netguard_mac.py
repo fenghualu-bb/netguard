@@ -391,6 +391,73 @@ class WatchTests(unittest.TestCase):
         self.assertTrue(os.path.exists(paths.STATUS))
 
 
+class ShutdownLockTests(unittest.TestCase):
+    """FlClash quits before the root daemon at shutdown; that lockdown must not need a manual release."""
+
+    def lock_then_reboot(self, mutate, reboot_after=20):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        mutate(pr)
+        svc.tick()
+        clock.advance(10)
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+        since = svc.read_guard()["since"]
+        # reboot: pf rules vanish, apps come back, boot time is after the lockdown
+        clock.advance(reboot_after)
+        pf.reboot()
+        pr.boot = int(clock())
+        pr.cores = FakeCores.healthy()
+        pr.tun, pr.egress_ip, pr.claude_ip = "utun5", "203.0.113.10", "203.0.113.10"
+        return svc, pf, pr, clock, since
+
+    def test_medium_shutdown_lock_released_after_boot_checks(self):
+        svc, pf, pr, clock, _ = self.lock_then_reboot(lambda p: setattr(p, "cores", []))
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+        self.assertFalse(svc.read_state()["claude_block"])
+        self.assertTrue(any("开机后自动解除" in e["summary"] for e in read_events()))
+
+    def test_waits_until_proxy_is_back(self):
+        svc, pf, pr, clock, _ = self.lock_then_reboot(lambda p: setattr(p, "tun", None))
+        pr.tun = None  # FlClash not up yet after boot
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+        pr.tun = "utun5"
+        clock.advance(10)
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+
+    def test_high_lock_still_needs_manual_release(self):
+        svc, pf, pr, clock, _ = self.lock_then_reboot(lambda p: setattr(p, "egress_ip", "192.0.2.50"))
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+    def test_old_medium_lock_not_auto_released(self):
+        svc, pf, pr, clock, _ = self.lock_then_reboot(lambda p: setattr(p, "cores", []),
+                                                    reboot_after=service.SHUTDOWN_WINDOW + 60)
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+    def test_no_reboot_no_auto_release(self):
+        svc, pf, pr, clock, kills, _ = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.boot = int(clock()) - 3600
+        pr.cores = []
+        svc.tick()
+        svc.tick()
+        pr.cores = FakeCores.healthy()
+        clock.advance(10)
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+
+class FakeCores:
+    @staticmethod
+    def healthy():
+        return [{"pid": 51, "uid": 0, "gid": 20, "comm": "FlClashCore", "privileged": True}]
+
+
 class ReleaseTests(unittest.TestCase):
     def locked(self):
         svc, pf, pr, clock, kills, notes = make_service(self)
