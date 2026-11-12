@@ -9,7 +9,7 @@ from . import VERSION, config, events, paths, util
 from .service import Service, UserError
 
 ROOT_COMMANDS = {"enable", "disable", "release", "guard-on", "guard-off", "isolate", "unisolate",
-                 "recover", "watch", "verify", "refresh", "whitelist"}
+                 "recover", "watch", "verify", "refresh", "whitelist", "drill"}
 
 
 def _is_root():
@@ -85,6 +85,7 @@ def main(argv=None):
     sub.add_parser("verify", help="完整自检，包括直连拦截测试")
     sub.add_parser("refresh", help="立即执行一次检查并写状态")
     sub.add_parser("recover", help="紧急恢复：移除 NetGuard 的全部 pf 规则并关闭断网保护")
+    sub.add_parser("drill", help="自动断线演练：退出 FlClash→验证直连被拦与锁定→重新打开；3 分钟未恢复自动急救")
     sub.add_parser("watch", help="（后台）常驻检查循环")
     ev = sub.add_parser("events", help="显示保护记录")
     ev.add_argument("-n", type=int, default=30)
@@ -172,6 +173,21 @@ def main(argv=None):
             if args.op in ("add", "remove") and not args.value:
                 raise UserError("请给出 IP 或网段")
             svc.whitelist(args.op, args.value)
+        elif command == "drill":
+            from .drill import Drill
+            result = Drill(svc).run()
+            print("—— 断线演练结果 ——")
+            print("断开期间采样 %d 次；公网请求成功 %d 次（其中非白名单出口 %d 次）"
+                  % (result["down_samples"], result["public_succeeded_while_down"], result["real_ip_leaks"]))
+            print("断开期间局域网网关可达 %d/%d 次" % (result["gateway_ok_while_down"], result["gateway_samples"]))
+            print("TUN 消失后 %s 秒触发锁定" % result["lockdown_after_seconds"])
+            print("重新打开 FlClash 后 %s 秒恢复网络%s" % (result["network_back_after_seconds"],
+                                                      "；已自动执行紧急恢复（断网保护已关闭，需重新 enable）" if result["rescued"] else ""))
+            print("记录文件：%s" % result["log"])
+            print("结论：%s" % ("通过" if result["passed"] else "未通过"))
+            if not result["rescued"]:
+                print("Claude 现在处于锁定（这是演练的预期结果），确认无误后运行 release 解除。")
+            return 0 if result["passed"] else 1
         elif command == "watch":
             util.log("watch 启动", "watch")
             svc.watch()
@@ -181,11 +197,12 @@ def main(argv=None):
         except Exception:
             pass
         return 0
-    except (UserError, config.ConfigError, util.CommandError) as exc:
-        util.log("拒绝/失败：%s" % exc, command)
-        print("失败：%s" % exc, file=sys.stderr)
-        return 1
-    except Exception as exc:  # pragma: no cover - unexpected
-        util.log("错误：%r" % exc, command)
+    except Exception as exc:
+        from .drill import DrillAbort
+        if isinstance(exc, (UserError, config.ConfigError, util.CommandError, DrillAbort)):
+            util.log("拒绝/失败：%s" % exc, command)
+            print("失败：%s" % exc, file=sys.stderr)
+            return 1
+        util.log("错误：%r" % exc, command)  # unexpected
         print("错误：%r" % exc, file=sys.stderr)
         return 1

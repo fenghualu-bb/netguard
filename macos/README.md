@@ -118,6 +118,13 @@ sudo /Library/NetGuard/bin/netguard guard-off    # 关闭自动防护（规则�
 ```
 工作台里的按钮调用的是同样的命令，执行前会弹出 macOS 的管理员密码框，相当于 Windows 的 UAC。
 
+## 自动断线演练
+
+```bash
+sudo /Library/NetGuard/bin/netguard drill
+```
+NetGuard 会自己退出 FlClash，确认 TUN 消失后保持断开 45 秒，每 2 秒采样一次：公网请求必须全部失败；如果有请求成功，会记下出口 IP，出现非白名单出口就判为泄露。同时检查局域网网关是否可达、是否在 TUN 消失后约 20 秒触发锁定。之后它会重新打开 FlClash，等网络恢复；3 分钟内没恢复，就自动执行紧急恢复，不会让你断网。整个过程不需要你配合计时，采样记录保存在 `/Library/NetGuard/drill-*.jsonl`。演练结束后 Claude 会处于锁定，这是预期结果，解除即可。Windows 版没有这个功能。
+
 ## 卸载
 
 ```bash
