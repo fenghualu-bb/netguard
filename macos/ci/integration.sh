@@ -285,8 +285,20 @@ echo "    三次启动到被结束的时间（秒）：$TIMES"
 for t in $TIMES; do
     check "伪 Claude 在 1 秒内被结束（${t} 秒）" python3 -c "import sys; sys.exit(0 if float('$t') < 1.0 else 1)"
 done
+# The CI exit is not whitelisted (203.0.113.10 is a documentation address), so with the
+# guard on NetGuard would rightly re-lock at once. Turn it off to test lifting alone.
+"$ROOT/bin/netguard" guard-off >/dev/null
 "$ROOT/bin/netguard" disable >/dev/null   # clears the isolation (unisolate needs a whitelisted exit)
 check "解除隔离后伪 Claude 不再被结束" bash -c "sudo -u $RUNNER $WORK/claude 2 & p=\$!; sleep 1; kill -0 \$p"
+
+# Exit outside the whitelist: locked on the first sighting (fast exit check every 3 s).
+"$ROOT/bin/netguard" guard-on >/dev/null
+LOCK_T0=$(date +%s)
+for _ in $(seq 1 40); do grep -q '"lockdown": true' "$ROOT/guard.json" && break; sleep 0.5; done
+LOCK_DT=$(( $(date +%s) - LOCK_T0 ))
+echo "    开启自动防护后 ${LOCK_DT} 秒锁定"
+check "出口不在白名单时首次发现即锁定（≤15 秒，原来约 20 秒）" bash -c "grep -q '\"lockdown\": true' $ROOT/guard.json && [ $LOCK_DT -le 15 ]"
+check "锁定没有经过“等待确认”" bash -c "! tail -n 3 $ROOT/events.jsonl | grep -q '\"type\": \"suspect\"'"
 
 section "7. 卸载"
 bash "$ROOT/uninstall.sh" --purge
