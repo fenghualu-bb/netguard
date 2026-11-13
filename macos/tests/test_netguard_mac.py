@@ -737,7 +737,7 @@ class ClaudeInstallJudgementTests(unittest.TestCase):
         import tempfile
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.home = os.path.join(tmp.name, "Users", "jim")
+        self.home = os.path.join(tmp.name, "Users", "alice")
         self.apps = os.path.join(tmp.name, "Applications")
         os.makedirs(self.home)
         os.makedirs(self.apps)
@@ -831,7 +831,7 @@ class ClaudeGuardPatchTests(unittest.TestCase):
     def test_finding_points_to_patch_until_applied(self):
         svc, pf, pr, clock, kills, notes = make_service(self)
         svc.enable(out=lambda *_: None)
-        pr.cg.update({"cli_path_ok": False, "cli_installed": ["/Users/jim/.local/share/claude/versions/2.1.322"],
+        pr.cg.update({"cli_path_ok": False, "cli_installed": ["/Users/alice/.local/share/claude/versions/2.1.322"],
                       "cg_patch": "original"})
         svc.tick()
         self.assertTrue(any("claudeguard-patch" in x for x in svc.read_guard()["last_findings"]))
