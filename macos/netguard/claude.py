@@ -10,6 +10,23 @@ import time
 
 EXCLUDE = ("claudeguard", "netguard")
 
+# Names resolved through FlClash while Claude is isolated. With fake-ip DNS each name gets
+# its own address in the TUN range; those addresses are refused through the TUN.
+# Unlisted subdomains are not covered (ClaudeGuard's hosts block is the backstop).
+DOMAINS = (
+    "claude.ai", "www.claude.ai", "app.claude.ai", "api.claude.ai", "auth.claude.ai",
+    "assets.claude.ai", "a-cdn.claude.ai", "a-api.claude.ai", "console.claude.ai", "status.claude.ai",
+    "claude.com", "www.claude.com", "app.claude.com", "api.claude.com", "auth.claude.com",
+    "console.claude.com", "code.claude.com", "docs.claude.com", "support.claude.com",
+    "platform.claude.com", "status.claude.com",
+    "claude.usercontent.com",
+    "anthropic.com", "www.anthropic.com", "api.anthropic.com", "console.anthropic.com",
+    "statsig.anthropic.com", "a-api.anthropic.com", "a-cdn.anthropic.com", "assets.anthropic.com",
+    "desktop-app-updates.anthropic.com", "docs.anthropic.com", "support.anthropic.com",
+    "status.anthropic.com", "events.anthropic.com", "feedback.anthropic.com",
+    "anthropic.ai", "www.anthropic.ai", "api.anthropic.ai",
+)
+
 
 def is_claude(comm, args, cfg):
     comm = comm or ""

@@ -44,7 +44,7 @@ class RenderTests(unittest.TestCase):
         # only loopback and the Anthropic refusal are quick; permits stay last-match
         for l in lines:
             if " quick " in l:
-                self.assertTrue("ng_loopback" in l or "ng_anthropic" in l, l)
+                self.assertTrue("ng_loopback" in l or "ng_anthropic" in l or "ng_claude" in l, l)
         self.assertTrue(lines[idx["ng_block_all"]].startswith("block return out all"))
 
     def test_core_permit_is_uid0_with_user_group(self):
@@ -85,6 +85,48 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("scrub", text)
 
 
+class ForeignPermitTests(unittest.TestCase):
+    def test_rule_judgement(self):
+        fp = pfrules.foreign_permit
+        self.assertTrue(fp("pass out quick all flags S/SA keep state", False))
+        self.assertFalse(fp("pass out all flags S/SA keep state", False))  # overridden by our block
+        self.assertTrue(fp("pass out all flags S/SA keep state", True))   # after us: last match wins
+        self.assertTrue(fp("pass quick inet proto tcp all", False))       # no direction = both
+        self.assertFalse(fp("pass in quick all", True))
+        self.assertFalse(fp("pass out quick on lo0 all", True))
+        self.assertFalse(fp("pass quick on awdl0 all", True))
+        self.assertFalse(fp("block drop out quick all", True))
+
+    def scan(self, foreign=None, main_extra=()):
+        from fakes import FakePfctl
+        runner = FakePfctl()
+        runner.anchor_text = pfrules.render(config.validate({}), 0, 20)
+        runner.foreign = dict(foreign or {})
+        runner.main_extra = list(main_extra)
+        return pfrules.PF(runner=runner).foreign_permits()
+
+    def test_clean_mac_has_no_bypass(self):
+        self.assertEqual(self.scan({"com.apple/250.ApplicationFirewall": "block drop in quick proto tcp all\n",
+                                    "com.apple/200.AirDrop": "pass in quick on awdl0 all\n"}), [])
+
+    def test_quick_pass_before_netguard_is_found(self):
+        got = self.scan({"com.apple/300.SomeVPN": "pass out quick all flags S/SA keep state\n"})
+        self.assertEqual(got, [("com.apple/300.SomeVPN", "pass out quick all flags S/SA keep state")])
+
+    def test_non_quick_pass_after_netguard_is_found(self):
+        got = self.scan({"com.apple/zzz.Late": "pass out all\n"})
+        self.assertEqual([w for w, _ in got], ["com.apple/zzz.Late"])
+        got = self.scan(main_extra=["pass out inet all keep state"])
+        self.assertEqual(got, [("main", "pass out inet all keep state")])
+
+    def test_main_anchor_after_com_apple_is_walked(self):
+        got = self.scan({"com.claudeguard": "block return out quick inet to 160.79.104.10\n"},
+                        main_extra=['anchor "com.claudeguard" all'])
+        self.assertEqual(got, [])
+        got = self.scan({"com.other": "pass out all\n"}, main_extra=['anchor "com.other" all'])
+        self.assertEqual(got, [("com.other", "pass out all")])
+
+
 class RenderModeTests(unittest.TestCase):
     def test_isolation_refuses_anthropic_through_tun_too(self):
         cfg = config.validate({})
@@ -92,6 +134,16 @@ class RenderModeTests(unittest.TestCase):
         isolated = [l for l in pfrules.render(cfg, 0, 20, isolate=True).splitlines() if "ng_anthropic" in l]
         self.assertTrue(all("from !" in l for l in normal))
         self.assertTrue(isolated and all("from" not in l for l in isolated))
+
+    def test_isolation_table_only_when_isolated_and_before_permits(self):
+        cfg = config.validate({})
+        self.assertNotIn("ng_claude", pfrules.render(cfg, 0, 20))
+        lines = [l for l in pfrules.render(cfg, 0, 20, isolate=True).splitlines()
+                 if l.strip() and not l.startswith("#")]
+        self.assertEqual(lines[0], "table <ng_claude> persist")
+        block = next(i for i, l in enumerate(lines) if 'label "ng_claude"' in l)
+        self.assertTrue(lines[block].startswith("block return out quick to <ng_claude>"))
+        self.assertLess(block, next(i for i, l in enumerate(lines) if "ng_tun" in l))
 
     def test_dns_block_parameter_overrides_auto(self):
         cfg = config.validate({})
@@ -107,6 +159,19 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(pfrules.token_in_references("88", "TOKENS:\n88 pfctl 999 1s\n") and False)
         self.assertFalse(pfrules.token_in_references("123456", refs))
         self.assertFalse(pfrules.token_in_references(None, refs))
+
+    def test_tun_addresses_keeps_only_fake_ip_answers(self):
+        cfg = config.validate({"whitelist": ["203.0.113.10"]})
+        answers = {"A": "cname.example.\n198.18.0.58\n160.79.104.10\n", "AAAA": "fdfe:dcba:9876::3a\n2607:6bc0::10\n"}
+        seen = []
+
+        def runner(args, input=None, timeout=15, env=None):
+            seen.append(args)
+            return subprocess.CompletedProcess(args, 0, answers[args[-2]], "")
+
+        got = probes.Probes(cfg, runner=runner).tun_addresses(["claude.ai"])
+        self.assertEqual(got, ["198.18.0.58", "fdfe:dcba:9876::3a"])
+        self.assertTrue(all(a[0] == paths.DIG and a[1] == "@1.1.1.1" for a in seen))
 
     def test_ps_with_spaces(self):
         rows = probes.parse_ps("  77     0    20 /Applications/FlClash.app/Contents/MacOS/FlClashCore\n"
@@ -277,25 +342,73 @@ class WatchTests(unittest.TestCase):
         svc.enable(out=lambda *_: None)
         return svc, pf, pr, clock, kills, notes
 
-    def test_high_finding_locks_after_two_ticks(self):
+    def test_egress_outside_whitelist_locks_on_first_sighting(self):
         svc, pf, pr, clock, kills, notes = self.enabled_service()
         pr.egress_ip = "192.0.2.50"
         svc.tick()
-        self.assertFalse(svc.read_guard()["lockdown"])
-        clock.advance(10)
-        svc.tick()
         g = svc.read_guard()
+        self.assertNotIn("suspect", types())
         self.assertTrue(g["lockdown"])
         self.assertTrue(svc.read_state()["claude_block"])
         self.assertEqual(len(kills), 1)
         self.assertIn("trigger", types())
         self.assertTrue(notes)
 
+    def test_claude_egress_also_locks_on_first_sighting(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        pr.claude_ip = "192.0.2.51"
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+        self.assertEqual(len(kills), 1)
+
+    def test_other_findings_still_need_two_readings(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        pr.cores = []
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+        self.assertIn("suspect", types())
+
+    def test_fast_egress_check_cuts_the_interval_short(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        svc.tick()
+        self.assertFalse(svc.fast_egress_due())  # whitelisted exit
+        clock.advance(1)
+        pr.egress_ip = "192.0.2.50"
+        self.assertFalse(svc.fast_egress_due())  # not due yet (every 3 s)
+        clock.advance(3)
+        self.assertTrue(svc.fast_egress_due())
+        svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+        clock.advance(3)
+        calls = pr.egress_calls
+        self.assertFalse(svc.fast_egress_due())  # locked: nothing left to catch
+        self.assertEqual(pr.egress_calls, calls)
+
+    def test_watch_runs_full_check_within_seconds_of_exit_change(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        svc.watch(forever=False)  # full check at t0; fast checks keep running in the loop
+        t0 = clock()
+        pr.egress_ip = "192.0.2.50"
+        svc.watch(forever=False)
+        self.assertTrue(svc.read_guard()["lockdown"])
+        self.assertLessEqual(clock() - t0, 2 * 10)
+
+    def test_foreign_bypass_is_a_high_finding(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        pf.foreign = {"com.apple/300.SomeVPN": "pass out quick all\n"}
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])  # confirmed like other pf findings
+        clock.advance(10)
+        svc.tick()
+        g = svc.read_guard()
+        self.assertTrue(g["lockdown"])
+        self.assertIn("pf_bypass", g["reason_codes"])
+
     def test_recovery_before_confirmation(self):
         svc, pf, pr, clock, kills, _ = self.enabled_service()
-        pr.egress_ip = "192.0.2.50"
+        cores, pr.cores = pr.cores, []
         svc.tick()
-        pr.egress_ip = "203.0.113.10"
+        pr.cores = cores
         svc.tick()
         self.assertFalse(svc.read_guard()["lockdown"])
         self.assertIn("recovered", types())
@@ -398,6 +511,40 @@ class WatchTests(unittest.TestCase):
         before = len(kills)
         svc.enforce_isolation()
         self.assertEqual(len(kills), before + 1)
+
+    def test_isolation_fills_fake_ip_table_and_unisolate_drops_it(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        self.assertIsNone(pf.table)
+        svc.isolate(out=lambda *_: None)
+        self.assertEqual(pf.table, ["198.18.0.58", "198.18.0.79"])
+        self.assertIn("2 个代理地址", events.read(1)[-1]["summary"])
+        svc.unisolate(out=lambda *_: None)
+        self.assertIsNone(pf.table)
+        self.assertNotIn("ng_claude", pf.anchor_text)
+
+    def test_lockdown_fills_table_and_watch_refreshes_it(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        pr.egress_ip = "198.51.100.7"  # not whitelisted: high finding
+        svc.tick(); clock.advance(10); svc.tick()
+        self.assertTrue(svc.read_guard()["lockdown"])
+        self.assertEqual(pf.table, ["198.18.0.58", "198.18.0.79"])
+        calls = pr.resolve_calls
+        pr.fake_ips = ["198.18.0.58", "198.18.3.88"]
+        clock.advance(10); svc.tick()
+        self.assertEqual(pr.resolve_calls, calls)  # not yet due
+        clock.advance(60); svc.tick()
+        self.assertEqual(pf.table, ["198.18.0.58", "198.18.3.88"])
+
+    def test_table_survives_rule_restore_and_tun_outage(self):
+        svc, pf, pr, clock, kills, _ = self.enabled_service()
+        svc.isolate(out=lambda *_: None)
+        pf.reboot()  # rules and table gone; boot reload happens in the next tick
+        svc.tick()
+        self.assertEqual(pf.table, ["198.18.0.58", "198.18.0.79"])
+        pr.tun = None
+        pr.fake_ips = []
+        clock.advance(70); svc.tick()
+        self.assertEqual(pf.table, ["198.18.0.58", "198.18.0.79"])  # kept while nothing resolves
 
     def test_watch_loop_enforces_between_ticks(self):
         svc, pf, pr, clock, kills, _ = self.enabled_service()

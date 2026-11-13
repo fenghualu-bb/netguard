@@ -29,11 +29,15 @@ class FakePfctl:
     def __init__(self):
         self.anchor_text = ""
         self.tokens = []
+        self.table = None
         self.next_token = 1000
         self.other_enabled = False
         self.main_ref = True
         self.calls = []
         self.fail_load = False
+        self.table = None  # None = no ng_claude table
+        self.main_extra = []      # extra main-ruleset lines after the com.apple/* anchor
+        self.foreign = {}         # other anchor name -> rules text (siblings or main anchors)
 
     def rules_output(self):
         out = []
@@ -55,6 +59,19 @@ class FakePfctl:
             if self.fail_load:
                 return subprocess.CompletedProcess(args, 1, "", "syntax error")
             self.anchor_text = input
+            if "table <ng_claude>" in input:
+                self.table = []  # a reload empties the declared table
+            return ok()
+        if a[:4] == ["-a", paths.ANCHOR, "-t", "ng_claude"]:
+            op = a[5]
+            if op == "replace":
+                self.table = list(a[6:])
+            elif op == "flush":
+                self.table = [] if self.table is not None else None
+            elif op == "kill":
+                self.table = None
+            elif op == "show":
+                return ok("".join("   %s\n" % x for x in (self.table or [])))
             return ok()
         if a == ["-a", paths.ANCHOR, "-sr"]:
             return ok(self.rules_output())
@@ -62,7 +79,15 @@ class FakePfctl:
             self.anchor_text = ""
             return ok()
         if a == ["-sr"]:
-            return ok('anchor "com.apple/*" all\n' if self.main_ref else "")
+            main = ['anchor "com.apple/*" all'] if self.main_ref else []
+            return ok("".join(l + "\n" for l in main + self.main_extra))
+        if a == ["-a", "com.apple", "-sA"]:
+            kids = [n for n in self.foreign if n.startswith("com.apple/") and n.count("/") == 1]
+            if self.anchor_text:
+                kids.append(paths.ANCHOR)
+            return ok("".join("  %s\n" % n for n in sorted(kids)))
+        if len(a) == 3 and a[0] == "-a" and a[2] == "-sr" and a[1] in self.foreign:
+            return ok(self.foreign[a[1]])
         if a == ["-s", "info"]:
             on = bool(self.tokens) or self.other_enabled
             return ok("Status: %s for 0 days\n" % ("Enabled" if on else "Disabled"))
@@ -86,6 +111,7 @@ class FakePfctl:
     def reboot(self):
         self.anchor_text = ""
         self.tokens = []
+        self.table = None
 
 
 class FakeProbes:
@@ -115,8 +141,15 @@ class FakeProbes:
         self.exempt = []
         self.procs = []
         self.args = {}
+        self.fake_ips = ["198.18.0.58", "198.18.0.79"]
+        self.resolve_calls = 0
 
-    def egress(self, url):
+    def tun_addresses(self, domains, resolver="1.1.1.1"):
+        self.resolve_calls += 1
+        return list(self.fake_ips)
+
+    def egress(self, url, max_time=8):
+        self.egress_calls = getattr(self, "egress_calls", 0) + 1
         return self.claude_ip if "claude" in url else self.egress_ip
 
     def find_core(self):

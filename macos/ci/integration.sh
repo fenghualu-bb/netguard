@@ -171,6 +171,13 @@ pfrules.PF().load(pfrules.render(config.validate({}), 0, $GID, dns_block=True, i
 check "变体规则已加载" anchor_loaded
 if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
     probe_case "隔离时 TUN 源地址去 Anthropic 也被拦" FAIL ng_anthropic runner -b 198.18.0.1 160.79.104.10 443 1500
+    # 1.0.0.1 stands in for a FlClash fake-ip answer of a Claude domain.
+    py "
+from netguard import pfrules
+pfrules.PF().set_claude_table(['1.0.0.1'])"
+    check "隔离地址表已写入" bash -c "/sbin/pfctl -a 'com.apple/zz.NetGuard' -t ng_claude -T show | grep -q 1.0.0.1"
+    probe_case "隔离时经 TUN 去 Claude 域名的代理地址被拦" FAIL ng_claude runner -b 198.18.0.1 1.0.0.1 443 1500
+    probe_case "隔离时经 TUN 去其他地址仍放行" - ng_tun runner -b 198.18.0.1 1.1.1.1 443 1500
     /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null
 fi
 probe_case "代理内核直连 1.1.1.1 仍放行（变体不影响代理）" OK ng_core core 1.1.1.1 443 5000
@@ -192,6 +199,15 @@ from netguard import config, probes
 print(','.join(probes.Probes(config.validate({})).exemption_users($GID, ['prober-core'])))")
 check "把它当作代理内核时不再报告" [ -z "$SEEN2" ]
 kill "$BG" 2>/dev/null; wait "$BG" 2>/dev/null
+
+echo "  -- 其他锚点的放行规则能否被发现"
+FOREIGN_SCAN='from netguard import pfrules; print(len(pfrules.PF().foreign_permits()))'
+check "没有外来放行规则时扫描为 0" [ "$(py "$FOREIGN_SCAN")" = "0" ]
+echo 'pass out quick all' | /sbin/pfctl -a com.apple/100.NGTestBypass -f - 2>/dev/null
+check "排在 NetGuard 前的 quick 放行被发现" [ "$(py "$FOREIGN_SCAN")" = "1" ]
+/sbin/pfctl -a com.apple/100.NGTestBypass -F rules >/dev/null 2>&1
+check "测试锚点清理后扫描回到 0" [ "$(py "$FOREIGN_SCAN")" = "0" ]
+
 /sbin/pfctl -a "$ANCHOR" -F rules >/dev/null 2>&1
 /sbin/pfctl -X "$MATRIX_TOKEN" >/dev/null 2>&1; MATRIX_TOKEN=""
 check "矩阵清理后规则为空" anchor_empty

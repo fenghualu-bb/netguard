@@ -142,8 +142,9 @@ class Probes:
         return found
 
     # ---- network checks ----
-    def egress(self, url):
-        result = self.runner([paths.CURL, "-s", "--noproxy", "*", "--max-time", "8", url], timeout=12)
+    def egress(self, url, max_time=8):
+        result = self.runner([paths.CURL, "-s", "--noproxy", "*", "--max-time", str(max_time), url],
+                             timeout=max_time + 4)
         return parse_trace(result.stdout) if result.returncode == 0 else None
 
     def direct_bypass(self, interface, target):
@@ -155,6 +156,37 @@ class Probes:
                               "--interface", interface, "--connect-timeout", "4", "--max-time", "6",
                               "-w", "%{http_code}", "https://%s/cdn-cgi/trace" % target], timeout=10)
         return result.returncode == 0 and (result.stdout or "").strip() not in ("", "000")
+
+    def tun_addresses(self, domains, resolver="1.1.1.1"):
+        """Fake-ip answers for `domains`: addresses inside the TUN range, sorted.
+
+        dig asks `resolver` directly (bypassing /etc/hosts, which ClaudeGuard may have
+        poisoned); with TUN DNS hijack FlClash answers. Real (non-TUN) answers are ignored:
+        Anthropic's own ranges are refused separately.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        nets = [ipaddress.ip_network(self.cfg["tun_v4"], strict=False),
+                ipaddress.ip_network(self.cfg["tun_v6"], strict=False)]
+
+        def one(job):
+            name, rtype = job
+            result = self.runner([paths.DIG, "@" + resolver, "+short", "+time=1", "+tries=1", rtype, name],
+                                 timeout=4)
+            return result.stdout if result.returncode == 0 else ""
+
+        jobs = [(d, t) for d in domains for t in ("A", "AAAA")]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            outputs = list(pool.map(one, jobs))
+        found = set()
+        for text in outputs:
+            for line in (text or "").splitlines():
+                try:
+                    addr = ipaddress.ip_address(line.strip())
+                except ValueError:
+                    continue  # CNAME lines
+                if any(addr.version == n.version and addr in n for n in nets):
+                    found.add(str(addr))
+        return sorted(found)
 
     def dns_ok(self, name="www.apple.com"):
         result = self.runner([paths.DSCACHEUTIL, "-q", "host", "-a", "name", name], timeout=10)

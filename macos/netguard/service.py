@@ -23,6 +23,10 @@ from . import VERSION, claude, config, events, notify, paths, pfrules, probes as
 
 CONFIRM = 2
 INTERVAL = 10
+# An exit outside the whitelist is not a flaky reading: every second Claude keeps running,
+# Anthropic sees a non-whitelisted IP. These lock on the first sighting (also inside grace).
+IMMEDIATE = ("egress", "egress_claude")
+EGRESS_FAST = 3  # between full checks, the ordinary exit is re-read this often
 ENFORCE_EVERY = 2
 ENFORCE_ISOLATED = 0.25  # dedicated thread: a relaunched Claude is ended within about a quarter second
 GRACE_SECONDS = 180
@@ -30,6 +34,7 @@ PENDING_SECONDS = 120
 SHUTDOWN_WINDOW = 600  # a medium-only lockdown this close before boot came from the shutdown
 CLAUDE_PATH_SETTLE = 90  # ClaudeGuard re-attaches its hooks every 60 s after a Claude update
 EXEMPT_CHECK_EVERY = 60
+CLAUDE_TABLE_EVERY = 60  # re-resolve Claude's fake-ip addresses while isolated
 DNS_PROBLEM = "DNS 解析失败"
 
 STATE_DEFAULTS = {"killswitch": False, "claude_block": False, "core_uid": 0, "core_gid": None,
@@ -66,6 +71,8 @@ class Service:
         self._first_seen = {}
         self._last_exempt_check = 0
         self._exempt_seen = set()
+        self._claude_table = {"at": 0, "count": None}
+        self._last_fast = 0
 
     # ------------------------------------------------------------------ io
     def read_state(self):
@@ -143,10 +150,39 @@ class Service:
         util.write_text(paths.ANCHOR_FILE, text, mode=0o644)
         token = self.pf.acquire_token(self.read_token())
         self.write_token(token)
+        if state.get("claude_block"):
+            self.fill_claude_table()  # a reload empties the table
+        else:
+            self.pf.drop_claude_table()
+            self._claude_table = {"at": 0, "count": None}
         return pfrules.fingerprint(self.pf.anchor_rules())
+
+    def fill_claude_table(self):
+        """Refuse Claude's fake-ip addresses through the TUN. Never raises; returns the count or None."""
+        self._claude_table["at"] = self.clock()
+        if not self.probes.tun_interface():
+            return self._claude_table["count"]  # nothing resolves now; keep what is loaded
+        try:
+            addresses = self.probes.tun_addresses(claude.DOMAINS)
+            self.pf.set_claude_table(addresses)
+        except Exception as exc:
+            util.log("隔离地址表更新失败：%s" % exc, "watch")
+            return self._claude_table["count"]
+        self._claude_table["count"] = len(addresses)
+        return len(addresses)
+
+    def claude_table_note(self):
+        count = self._claude_table["count"]
+        if count is None:
+            return ""
+        if count:
+            return "；TUN 内同时拒绝 Claude 域名的 %d 个代理地址" % count
+        return "；未取得 Claude 域名的代理地址（FlClash 未使用 fake-ip 时属正常）"
 
     def remove_rules(self):
         self.pf.flush()
+        self.pf.drop_claude_table()
+        self._claude_table = {"at": 0, "count": None}
         self.pf.release_token(self.read_token())
         self.clear_token()
 
@@ -261,6 +297,12 @@ class Service:
                 f.append(events.finding("killswitch", "断网保护规则不完整" + (
                     "（pf 主规则集缺少 com.apple/* 锚点，可能开启了“互联网共享”）"
                     if integ.get("pf_enabled") and not integ.get("main_anchor_ref") else "")))
+            if integ.get("complete"):
+                permits = self.foreign_permits()
+                obs["foreign_permits"] = ["%s：%s" % p for p in permits]
+                if permits:
+                    f.append(events.finding("pf_bypass", "其他防火墙规则可能绕过断网保护（共 %d 条，第一条在 %s：%s）"
+                                            % (len(permits), permits[0][0], permits[0][1][:120])))
         if cfg["require_claudeguard"]:
             cg = self.probes.claudeguard()
             obs["claudeguard"] = cg
@@ -288,6 +330,12 @@ class Service:
                 if broken:
                     f.append(events.finding("claude_path", "；".join(broken)))
         return f, obs
+
+    def foreign_permits(self):
+        try:
+            return self.pf.foreign_permits()
+        except pfrules.PFError:
+            return []  # a failed read is not proof of a bypass
 
     def settle(self, findings):
         """claude_path counts only after it persists past ClaudeGuard's own 60 s self-repair."""
@@ -365,6 +413,9 @@ class Service:
             guard = self.read_guard()
             self.handle_pending(state)
             integ = self.ensure_rules(state) if state["killswitch"] else None
+            if state["killswitch"] and state["claude_block"] and \
+                    self.clock() - self._claude_table["at"] >= CLAUDE_TABLE_EVERY:
+                self.fill_claude_table()
             findings, obs = self.observe(state, integ)
             if self.dns_safety_valve(state, obs):
                 integ = self.ensure_rules(state)
@@ -406,7 +457,10 @@ class Service:
                 self.write_guard(guard)
                 return guard
             guard["bad_streak"] = int(guard["bad_streak"]) + 1
-            if guard["bad_streak"] == 1:
+            immediate = any(x["key"] in IMMEDIATE for x in findings)
+            if immediate and guard["bad_streak"] < CONFIRM:
+                guard["bad_streak"] = CONFIRM  # confirmed now; no second reading
+            elif guard["bad_streak"] == 1:
                 events.add("suspect", "发现异常，等待确认（%d 次）" % CONFIRM, findings)
             if guard["bad_streak"] >= CONFIRM:
                 if state["claude_block"]:
@@ -426,7 +480,7 @@ class Service:
                     self.write_state(state)
                     util.log("隔离规则加载失败：%s" % exc, "watch")
                 killed = self.kill_claude()
-                summary = "已触发保护：Claude 已隔离，结束 %d 个 Claude 进程" % killed
+                summary = "已触发保护：Claude 已隔离，结束 %d 个 Claude 进程" % killed + self.claude_table_note()
                 events.add("trigger", summary, findings, {"killed": killed})
                 util.log(summary, "watch")
                 self.notify("NetGuard 已锁定 Claude", "；".join(guard["reasons"])[:180] +
@@ -491,6 +545,7 @@ class Service:
             "active_killswitch": bool(wanted and integ.get("complete") and integ.get("token_live")),
             "integrity": integ, "pending": state.get("pending"),
             "claude_block": bool(state["claude_block"]),
+            "claude_table": self._claude_table["count"] if state["claude_block"] else None,
             "realip": bool(state["claude_block"] and not guard.get("lockdown")),
             "dns_block": bool(state.get("dns_block")),
             "guard": {k: guard.get(k) for k in ("enabled", "lockdown", "since", "reasons", "bad_streak",
@@ -506,6 +561,21 @@ class Service:
         }
         util.write_json(paths.STATUS, status, mode=0o644)
         return status
+
+    def fast_egress_due(self):
+        """Cheap exit re-check between full checks. True = run a full check now.
+
+        Only while protection could still act: guard on, not locked, Claude not isolated.
+        """
+        if self.clock() - self._last_fast < EGRESS_FAST:
+            return False
+        self._last_fast = self.clock()
+        guard = self.read_guard()
+        wl = self.cfg["whitelist"]
+        if not guard["enabled"] or guard["lockdown"] or not wl or self.read_state()["claude_block"]:
+            return False
+        ip = self.probes.egress(self.cfg["check_url"], max_time=2)
+        return bool(ip) and not config.ip_in_whitelist(ip, wl)
 
     def watch(self, forever=True):
         prev = None
@@ -536,6 +606,12 @@ class Service:
                         self.enforce_isolation()
                 except Exception as exc:
                     util.log("隔离执行出错：%s" % exc, "watch")
+                try:
+                    if not blocked and self.fast_egress_due():
+                        util.log("快速出口检查发现出口不在白名单，立即完整检查", "watch")
+                        break  # the next full check locks on this first sighting
+                except Exception as exc:
+                    util.log("快速出口检查出错：%s" % exc, "watch")
                 left = INTERVAL - (self.clock() - start)
                 if left <= 0:
                     break
@@ -681,7 +757,7 @@ class Service:
             state["claude_block"] = True
             self.refresh_rules(state)
         killed = self.kill_claude()
-        events.add("isolate", "已隔离 Claude（用户进入真实 IP 模式），结束 %d 个进程" % killed,
+        events.add("isolate", "已隔离 Claude（用户进入真实 IP 模式），结束 %d 个进程" % killed + self.claude_table_note(),
                    [events.finding("user", "用户进入真实 IP 模式")])
         out("Claude 已隔离：已结束 %d 个进程，重新打开也会被立即结束。" % killed)
 
@@ -789,6 +865,9 @@ class Service:
             row(integ["complete"], "pf 规则完整", "pf=%s 锚点引用=%s 规则=%s 条" % (
                 integ["pf_enabled"], integ["main_anchor_ref"], integ["rule_count"]))
             row(integ.get("token_live", False), "pf 启用引用（token）有效")
+            permits = self.foreign_permits()
+            row(not permits, "没有其他防火墙规则能绕过断网保护",
+                "；".join("%s：%s" % p for p in permits)[:300])
             row(self.probes.dns_ok() and self.probes.dns_reachable(), "DNS 解析正常（含不经缓存的直接查询）")
             out("ℹ️ 局域网 DNS：%s（设置 %s）" % ("拦截" if state.get("dns_block") else "放行", self.cfg["block_lan_dns"]))
             physical = self.probes.physical_interfaces()
