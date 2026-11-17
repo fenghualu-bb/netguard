@@ -116,7 +116,39 @@ sudo /Library/NetGuard/bin/netguard isolate      # 真实 IP 模式：隔离 Cla
 sudo /Library/NetGuard/bin/netguard unisolate    # 退出（出口需回到白名单）
 sudo /Library/NetGuard/bin/netguard guard-off    # 关闭自动防护（规则不变）
 ```
-工作台里的按钮调用的是同样的命令，执行前会弹出 macOS 的管理员密码框，相当于 Windows 的 UAC。
+工作台里的“刷新状态”只读取后台已写出的最新状态，不需要密码；后台仍每 10 秒检查一次。
+“解除锁定”通过一次管理员授权安装的受限本地服务，请求原有 `netguard release`：双出口、白名单、TUN、
+ClaudeGuard 和规则完整性检查保持不变，有一项不通过就保持锁定。该接口仅接受当前桌面登录用户的解除请求，
+使用内核身份核验，不接受其他命令或任意参数。它还核对**发起请求的程序**：必须是已安装的
+`/Applications/NetGuard.app`（root 所有、以 hardened runtime 签名，无法用 `DYLD_INSERT_LIBRARIES` 注入）。
+同一账户下的其他程序（脚本、终端、Codex / Claude Code 等代理）直接运行 `netguard-control release` 会被拒绝，
+需要用 `sudo /Library/NetGuard/bin/netguard release` 并输入密码。剩余风险：已获得“辅助功能”权限的程序可以
+模拟点击工作台按钮。
+关闭保护、修改白名单、卸载等其他管理员操作仍使用系统密码框。不会保存密码或修改 sudoers。
+
+白名单修改（工作台或 `netguard whitelist`）在 10 秒内被后台读取，不需要重启后台。断网保护开启时，
+不能删除最后一个白名单 IP；白名单若被清空（例如手工编辑 config.json），后台会立即锁定 Claude。
+
+本地接口为 `/Library/NetGuard/control.sock`（仅桌面用户可访问，模式 0600），由 root 的
+`com.netguard.control` LaunchDaemon 提供，程序位于 root 所有的安装目录。
+服务不可用时明确报错，不回退到跳过检查或关闭保护；CLI 的原有 root 命令权限不变。
+
+## 启动时安全自动更新界面（本地新增）
+
+菜单栏程序每次启动时自动检查指定仓库的 `main`，不依赖 Codex 定时任务，也不新增定时器或后台服务。
+没有新版本、网络不可用或检查失败时，继续使用当前版本。维护页的“检查并安全更新界面”使用同一流程。
+
+自动更新范围仅为界面：必须确认目标提交的 macOS 单元测试与真实 pf CI 全部通过，保护文件及配置哈希未变，
+且保护状态正常；以普通用户下载并编译，再通过系统管理员密码框安装。安装前运行完整 `verify`，更新只重启菜单栏，
+不停止守护进程、不重载 pf、不退出 Claude 或浏览器；界面替换/签名失败会还原原界面。
+
+涉及保护代码、安装/启动脚本或 CI 流程的更新会暂缓，显示需要完整审核升级；不会用自动更新覆盖本地解锁修复。
+因此这不是整个保护组件的无人值守升级。保护核心更新仍须按本文件的升级和真机验证流程进行。
+上游尚未合并此功能时，新界面构建会保留本地安全更新入口；入口结构不兼容时暂缓升级。
+
+策略在 `/Library/NetGuard/gui-update-policy.json`（root 所有），检查结果在
+`~/Library/Application Support/NetGuard/Updates/update-status.json`。这里分别记录保护基线与界面提交，
+工作区原有源码、补丁和验收记录均保留，不自动 `git pull` 或提交文件。
 
 ## 自动断线演练
 
@@ -154,6 +186,7 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 
 - **只读的状态检查不能证明不会泄露。** 绿色只表示“当前检查通过（未做断线测试）”。停代理、睡眠唤醒、切换网络要按 [ACCEPTANCE.md](ACCEPTANCE.md) 在真机上验收。
 - **隔离机制不同**：macOS 的 pf 不能按程序拦截，所以隔离靠“独立线程每 0.25 秒强制结束进程”。隔离期间，经 TUN 发往 Claude 常用域名（claude.ai、claude.com、anthropic.com 的主要子域，列表见 `netguard/claude.py`）的连接也会被拒绝，浏览器打开 claude.ai 同样不通。列表以外的子域名不在其中，要靠 ClaudeGuard 的 hosts 拦截和启动前检查兜底，所以 ClaudeGuard 默认是必需的。FlClash 内核未运行时无法查询，地址表保持上一次的内容。
+- **隔离期间的出口核验**：为避免隔离规则拦住 NetGuard 自己的 `claude.ai` 检查、导致永远不能解除，隔离期间通过 FlClash 已有的本地 SOCKS 通道访问同一个 HTTPS 检查地址。只接受配置中的 mixed/socks 端口，并核对监听者确实是获授权的 root FlClash 内核；不能确认时保持隔离。普通出口仍独立经过 TUN 检查，双出口白名单、TUN、全局模式、ClaudeGuard 和防火墙完整性检查仍须通过后才解除锁定；不提前清空隔离表，不修改系统代理。解除后恢复经 TUN 的常规检查。
 - **开机最早的几秒**：Windows 的规则由系统在开机最早阶段加载；Mac 由 LaunchDaemon 加载，最早一两秒内系统后台程序可能先联网。要做到和 Windows 一样早，只能修改 `/etc/pf.conf`，而这正是上次让 Mac 无法恢复的高风险做法，所以刻意不做。这时你还没登录，Claude 不可能在运行。
 - **局域网 DNS 被放行时**（系统 DNS 就是路由器），路由器能看到你查询了哪些域名，但看不到真实 IP 与 Anthropic 之间的连接。保护记录里会有“放行局域网 DNS”一条。
 - **你自己以 root 身份运行的 setuid 程序**（如 `traceroute`）与代理内核共用放行身份；NetGuard 会在 1 分钟内发现并通知，但不会拦截。
@@ -174,7 +207,7 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 
 ## 配置 `/Library/NetGuard/config.json`
 
-修改后执行 `sudo launchctl kickstart -k system/com.netguard.daemon` 生效；如果改了规则相关项，还要再执行一次 `enable`。
+后台每次检查（10 秒内）都会读取修改，无需重启后台；文件格式错误时继续使用原配置并写入日志。如果改了规则相关项（网段、DNS 等），还要再执行一次 `enable`。
 
 | 键 | 默认 | 说明 |
 |---|---|---|

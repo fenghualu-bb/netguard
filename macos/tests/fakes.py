@@ -152,6 +152,9 @@ class FakeProbes:
         self.egress_calls = getattr(self, "egress_calls", 0) + 1
         return self.claude_ip if "claude" in url else self.egress_ip
 
+    def claude_egress(self, url, isolated=False, max_time=8):
+        return self.egress(url, max_time=max_time)
+
     def find_core(self):
         return [dict(c) for c in self.cores]
 

@@ -73,6 +73,36 @@ class Service:
         self._exempt_seen = set()
         self._claude_table = {"at": 0, "count": None}
         self._last_fast = 0
+        self._cfg_stamp = self._config_stamp()
+
+    # ------------------------------------------------------------------ config
+    @staticmethod
+    def _config_stamp():
+        try:
+            info = os.stat(paths.CONFIG)
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+    def reload_config(self):
+        """Pick up `whitelist add/remove` made by another process (the long-running daemon).
+
+        An unreadable or invalid file keeps the configuration already in use.
+        """
+        stamp = self._config_stamp()
+        if stamp is None or stamp == self._cfg_stamp:
+            return False
+        try:
+            cfg = config.load()
+        except config.ConfigError as exc:
+            util.log("config.json 无效，继续使用原配置：%s" % exc, "watch")
+            self._cfg_stamp = stamp
+            return False
+        self._cfg_stamp = stamp
+        self.cfg = cfg
+        self.probes.cfg = cfg
+        util.log("已重新读取配置（白名单 %d 项）" % len(cfg["whitelist"]), "watch")
+        return True
 
     # ------------------------------------------------------------------ io
     def read_state(self):
@@ -257,6 +287,9 @@ class Service:
         wl = cfg["whitelist"]
         if require and not wl:
             f.append(events.finding("egress", "白名单为空，无法验证安全解除"))
+        elif state.get("killswitch") and not wl:
+            # Without a whitelist no exit can be judged, so the exit guard would silently stop.
+            f.append(events.finding("egress", "白名单为空，无法核对出口是否安全"))
         ip = self.probes.egress(cfg["check_url"])
         obs["egress"] = ip
         obs["egress_ok"] = config.ip_in_whitelist(ip, wl)
@@ -264,7 +297,7 @@ class Service:
             f.append(events.finding("egress", "普通出口未取得，保持锁定"))
         if ip and wl and not obs["egress_ok"]:
             f.append(events.finding("egress", "普通出口 %s 不在白名单" % ip))
-        cip = self.probes.egress(cfg["claude_check_url"])
+        cip = self.probes.claude_egress(cfg["claude_check_url"], isolated=bool(state.get("claude_block")))
         obs["claude_egress"] = cip
         obs["claude_egress_ok"] = config.ip_in_whitelist(cip, wl)
         if require and not cip:
@@ -408,6 +441,7 @@ class Service:
 
     def tick(self):
         started = self.clock()
+        self.reload_config()
         with util.StateLock():
             state = self.read_state()
             guard = self.read_guard()
@@ -570,6 +604,7 @@ class Service:
         if self.clock() - self._last_fast < EGRESS_FAST:
             return False
         self._last_fast = self.clock()
+        self.reload_config()
         guard = self.read_guard()
         wl = self.cfg["whitelist"]
         if not guard["enabled"] or guard["lockdown"] or not wl or self.read_state()["claude_block"]:
@@ -765,13 +800,13 @@ class Service:
         with util.StateLock():
             if self.read_guard()["lockdown"]:
                 raise UserError("当前处于自动防护锁定，请用“解除锁定”（会先完整检查）。")
+            state = self.read_state()
             ip = self.probes.egress(self.cfg["check_url"])
-            cip = self.probes.egress(self.cfg["claude_check_url"])
+            cip = self.probes.claude_egress(self.cfg["claude_check_url"], isolated=bool(state.get("claude_block")))
             wl = self.cfg["whitelist"]
             if not wl or not config.ip_in_whitelist(ip, wl) or not config.ip_in_whitelist(cip, wl):
                 raise UserError("出口尚未回到白名单（普通出口 %s，Claude 看到 %s），保持隔离。请先把 FlClash 切回正常模式。"
                                 % (ip, cip))
-            state = self.read_state()
             state["claude_block"] = False
             self.refresh_rules(state)
         events.add("unisolate", "已解除 Claude 隔离（出口 %s 已核实在白名单）" % ip,
@@ -822,6 +857,9 @@ class Service:
                 entry = config.normalize_whitelist_entry(value)
                 if entry not in wl:
                     raise UserError("白名单里没有 %s" % entry)
+                if len(wl) == 1 and self.read_state()["killswitch"]:
+                    raise UserError("断网保护开启时不能删除最后一个白名单 IP（删空后无法核对出口）。"
+                                    "请先添加新的 IP，再删除 %s。" % entry)
                 wl.remove(entry)
             elif op == "import-claudeguard":
                 user = self.probes.console_user()
@@ -834,6 +872,7 @@ class Service:
             cfg["whitelist"] = wl
             self.cfg = config.save(cfg)
             self.probes.cfg = self.cfg
+            self._cfg_stamp = self._config_stamp()
         events.add("config", "白名单已更新（%s），共 %d 项" % (op, len(self.cfg["whitelist"])),
                    [events.finding("user", "用户修改白名单")])
         for entry in self.cfg["whitelist"] or ["（白名单为空）"]:

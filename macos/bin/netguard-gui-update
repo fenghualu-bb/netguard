@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+cd /private/tmp
+PY="$(cat /Library/NetGuard/python-path)"
+exec "$PY" -I /Library/NetGuard/lib/netguard/gui_update.py "$@"

@@ -190,6 +190,7 @@ final class Model: ObservableObject {
     @Published var decodeError: String?
     @Published var events: [NGEvent] = []
     @Published var busy = false
+    @Published var guiUpdateMessage = "启动时自动检查；保护组件变更会暂缓更新。"
     private var timer: Timer?
 
     init() {
@@ -200,6 +201,11 @@ final class Model: ObservableObject {
     }
 
     func reload() {
+        let updateFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/NetGuard/Updates/update-status.json")
+        if let data = try? Data(contentsOf: updateFile),
+           let update = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let message = update["message"] as? String { guiUpdateMessage = message }
         let decoder = JSONDecoder()
         if let data = FileManager.default.contents(atPath: ngRoot + "/status.json") {
             do {
@@ -232,6 +238,7 @@ final class Model: ObservableObject {
         if s.wantedKillswitch != true { return .off }
         if s.realip == true { return .warn }
         if !(s.guardInfo?.last_findings ?? []).isEmpty { return .warn }
+        if s.observations?.egress_ok != true || s.observations?.claude_egress_ok != true { return .warn }
         return .ok
     }
 
@@ -245,8 +252,20 @@ final class Model: ObservableObject {
         if s.realip == true { return "真实 IP 模式：Claude 已隔离" }
         let f = s.guardInfo?.last_findings ?? []
         if !f.isEmpty { return "有异常：" + f.joined(separator: "；") }
+        if s.observations?.egress_ok != true || s.observations?.claude_egress_ok != true {
+            return "出口待核实：探测未通过，不能据此判定整机断网"
+        }
         return "当前检查通过（未做断线测试）"
     }
+
+    // NETGUARD_LOCAL_RELEASE_V1
+    /// The local root helper accepts only release and retains all original checks.
+    func releaseWithoutPassword() {
+        runProcess("/Library/NetGuard/bin/netguard-control", ["release"])
+    }
+
+    /// Refresh reads the latest state; the background continues checking every 10 s.
+    func refreshStatus() { reload() }
 
     /// Runs the root CLI through the macOS administrator prompt.
     func admin(_ args: [String], done: ((Bool, String) -> Void)? = nil) {
@@ -312,20 +331,7 @@ final class Model: ObservableObject {
         runProcess("/bin/bash", ["/Library/NetGuard/bin/claudeguard-patch"])
     }
 
-    func update() {
-        guard let repo = status?.source?.repo, FileManager.default.fileExists(atPath: repo + "/macos/install.sh") else {
-            showResult(false, "找不到安装来源（/Library/NetGuard/source.json）。请在仓库目录运行 git pull 后重新运行 install.sh。")
-            return
-        }
-        runProcess("/usr/bin/git", ["-C", repo, "pull", "--ff-only"]) { ok, text in
-            if !ok {
-                showResult(false, "git pull 失败（未改动已安装的程序）：\n" + text)
-                return
-            }
-            if !confirm("安装更新？", "已拉取最新代码：\n\(text.suffix(400))\n\n接下来以管理员身份重新运行 install.sh（保留配置与状态，不改动断网规则）。") { return }
-            self.adminShell("/bin/bash " + shellQuote(repo + "/macos/install.sh"))
-        }
-    }
+    func update() { netguardSafeGUIUpdate(manual: true) }
 
     func uninstall() {
         if !confirm("卸载 NetGuard？", "会移除断网规则、后台、菜单栏程序和紧急恢复入口，配置与保护记录保留一份副本。卸载后代理断开时可能经真实 IP 联网。") { return }
@@ -496,10 +502,10 @@ struct OverviewView: View {
                     }
                 }
                 Button(s?.realip == true ? "退出真实 IP 模式…" : "进入真实 IP 模式…") { showWizard = true }
-                Button("解除锁定") { model.admin(["release"]) }.disabled(g?.lockdown != true)
+                Button("解除锁定") { model.releaseWithoutPassword() }.disabled(g?.lockdown != true)
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
-                Button("刷新检测") { model.admin(["refresh"]) }.keyboardShortcut("r")
+                Button("刷新状态") { model.refreshStatus() }.keyboardShortcut("r")
             }
             .padding(12)
         }
@@ -671,9 +677,13 @@ struct MaintenanceView: View {
                     let src = model.status?.source
                     Line(label: "安装来源", value: "\(src?.repo ?? "未记录") @ \(src?.commit ?? "?")（\(src?.installed_at ?? "?")）")
                     HStack {
-                        Button("更新 NetGuard（git pull + 重新安装）") { model.update() }
+                        Button("检查并安全更新界面") { model.update() }
                         Button("卸载 NetGuard…") { model.uninstall() }
                     }
+                    Text(model.guiUpdateMessage).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("自动更新仅替换界面；保护后台、断网规则和本地修复持续运行。保护组件更新需完整审核升级。")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Card(title: "文件与急救") {
                     HStack {
@@ -717,6 +727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var refresh: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        netguardSafeGUIUpdate()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
         menu.delegate = self
@@ -761,7 +772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if s?.guardInfo?.lockdown == true {
             menu.addItem(withTitle: "解除锁定…", action: #selector(releaseLockdown), keyEquivalent: "").target = self
         }
-        menu.addItem(withTitle: "刷新检测…", action: #selector(refreshNow), keyEquivalent: "r").target = self
+        menu.addItem(withTitle: "刷新状态", action: #selector(refreshNow), keyEquivalent: "r").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "紧急恢复（移除断网规则）…", action: #selector(recoverNow), keyEquivalent: "").target = self
         menu.addItem(withTitle: "退出菜单栏图标", action: #selector(quitApp), keyEquivalent: "q").target = self
@@ -791,8 +802,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             model.admin(["disable"])
         }
     }
-    @objc func releaseLockdown() { model.admin(["release"]) }
-    @objc func refreshNow() { model.admin(["refresh"]) }
+    @objc func releaseLockdown() { model.releaseWithoutPassword() }
+    @objc func refreshNow() { model.refreshStatus() }
     @objc func recoverNow() {
         if confirm("执行紧急恢复？", "会移除 NetGuard 的全部 pf 规则并关闭断网保护。") {
             NSWorkspace.shared.open(URL(fileURLWithPath: recoverCommand))
@@ -809,5 +820,40 @@ struct NetGuardMain {
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
+    }
+}
+
+
+// NETGUARD_SAFE_GUI_UPDATE_V1 — root-owned helper never replaces the guard.
+func netguardSafeGUIUpdate(manual: Bool = false) {
+    DispatchQueue.global().async {
+        let helper = "/Library/NetGuard/bin/netguard-gui-update"
+        func run(_ exe: String, _ args: [String]) -> (Bool, String) {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+            do {
+                try p.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                return (p.terminationStatus == 0, String(data: data, encoding: .utf8) ?? "")
+            } catch { return (false, String(describing: error)) }
+        }
+        let (ok, text) = run(helper, ["prepare"])
+        let data = text.data(using: .utf8)
+        let result = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        guard ok, let value = result else {
+            if manual { DispatchQueue.main.async { showResult(false, text) } }; return
+        }
+        guard value["status"] as? String == "ready", let stage = value["stage"] as? String else {
+            if manual { DispatchQueue.main.async { showResult(value["status"] as? String == "current", value["message"] as? String ?? text) } }
+            return
+        }
+        DispatchQueue.main.async {
+            // Administrative authorization is always the macOS system password dialog.
+            let command = shellQuote(helper) + " apply " + shellQuote(stage)
+            DispatchQueue.global().async {
+                let (installed, output) = run("/usr/bin/osascript", ["-e", "do shell script \"\(command) 2>&1\" with administrator privileges"])
+                if !installed || manual { DispatchQueue.main.async { showResult(installed, output) } }
+            }
+        }
     }
 }

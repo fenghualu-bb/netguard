@@ -1,0 +1,5 @@
+#!/bin/sh
+# Only a fixed root-owned module; no caller-selected Python, script, or shell command.
+ROOT=/Library/NetGuard
+PY=$(/bin/cat "$ROOT/python-path")
+exec "$PY" -I -B "$ROOT/lib/netguard/control.py" "$@"

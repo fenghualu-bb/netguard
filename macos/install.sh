@@ -79,7 +79,7 @@ cp "$SRC/netguard_main.py" "$ROOT/lib/netguard_main.py"
 find "$ROOT/lib" -name '__pycache__' -type d -prune -exec rm -rf {} +
 chown -R root:wheel "$ROOT/lib"
 chmod -R u=rwX,go=rX "$ROOT/lib"
-for f in netguard netguard-boot netguard-recover; do
+for f in netguard netguard-boot netguard-recover netguard-gui-update netguard-control; do
     install -o root -g wheel -m 755 "$SRC/bin/$f" "$ROOT/bin/$f"
 done
 install -o root -g wheel -m 755 "$SRC/uninstall.sh" "$ROOT/uninstall.sh"
@@ -110,6 +110,17 @@ install -o root -g wheel -m 644 "$SRC/launchd/$LABEL.plist" "$PLIST"
 plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap system "$PLIST"
 
+say "注册受限本地接口（仅当前桌面用户可请求原有 release，检查不变）"
+CONTROL_LABEL=com.netguard.control
+CONTROL_PLIST=/Library/LaunchDaemons/$CONTROL_LABEL.plist
+launchctl bootout "system/$CONTROL_LABEL" 2>/dev/null || true
+install -o root -g wheel -m 644 "$SRC/launchd/$CONTROL_LABEL.plist" "$CONTROL_PLIST"
+plutil -lint "$CONTROL_PLIST" >/dev/null
+launchctl bootstrap system "$CONTROL_PLIST"
+
+say "初始化保守自动更新：仅界面可自动替换，保护组件变更须完整审核升级"
+"$ROOT/bin/netguard-gui-update" init-policy
+
 say "安装紧急恢复入口：$RECOVER_CMD"
 install -o root -g wheel -m 755 "$SRC/scripts/recover.command" "$RECOVER_CMD"
 
@@ -120,10 +131,13 @@ if [ "$BUILD_APP" -eq 1 ]; then
             -o "$BUILD/NetGuard" "$SRC/app/NetGuardApp.swift" \
             -framework AppKit -framework SwiftUI 2>"$BUILD/swiftc.log"; then
         rm -rf "$APP"
-        install -d -o root -g wheel -m 755 "$APP/Contents/MacOS" "$APP/Contents/Resources"
+        install -d -o root -g wheel -m 755 "$APP" "$APP/Contents" "$APP/Contents/MacOS" "$APP/Contents/Resources"
         install -o root -g wheel -m 755 "$BUILD/NetGuard" "$APP/Contents/MacOS/NetGuard"
         install -o root -g wheel -m 644 "$SRC/app/Info.plist" "$APP/Contents/Info.plist"
-        codesign --force --sign - "$APP" >/dev/null 2>&1 || warn "ad-hoc 签名失败（通常不影响本机运行）"
+        # Hardened runtime: DYLD_INSERT_LIBRARIES cannot load foreign code into the app. The local
+        # release interface (netguard-control) accepts requests only from this signed app.
+        codesign --force --options runtime --sign - "$APP" >/dev/null 2>&1 || \
+            warn "ad-hoc 签名失败：界面仍可运行，但工作台的“解除锁定”会被本地接口拒绝，需改用 sudo netguard release"
         AGENT="$USER_HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
         install -d -o "$USER_NAME" -m 755 "$USER_HOME/Library/LaunchAgents"
         install -o "$USER_NAME" -m 644 "$SRC/launchd/$AGENT_LABEL.plist" "$AGENT"

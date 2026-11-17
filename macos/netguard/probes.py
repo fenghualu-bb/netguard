@@ -147,6 +147,71 @@ class Probes:
                              timeout=max_time + 4)
         return parse_trace(result.stdout) if result.returncode == 0 else None
 
+    def isolated_proxy(self):
+        """Find a SOCKS listener owned by the authorized FlClash core, or fail closed.
+
+        Never trust a port from the desktop user's YAML without checking its actual
+        listener. Only loopback is used; no system proxy or firewall setting changes.
+        """
+        fl = self.flclash_config()
+        if fl.get("source") != "config.yaml" or not fl.get("path"):
+            return None
+        try:
+            with open(fl["path"], encoding="utf-8-sig") as stream:
+                text = stream.read(400_000)
+        except (OSError, UnicodeError):
+            return None
+        ports = []
+        for key in ("mixed-port", "socks-port"):
+            values = re.findall(r"^" + key + r":([^\n]*)$", text, re.M)
+            if len(values) > 1:
+                return None
+            if not values:
+                continue
+            value = re.fullmatch(r"\s*(?:([0-9]+)|'([0-9]+)'|\"([0-9]+)\")\s*(?:#.*)?", values[0])
+            if value is None:
+                return None
+            port = int(next(v for v in value.groups() if v is not None))
+            if port == 0:
+                continue
+            if not 1 <= port <= 65535:
+                return None
+            ports.append(port)
+        cores = {c["pid"] for c in self.find_core() if c.get("privileged")}
+        if not cores:
+            return None
+        for port in ports:
+            result = self.runner(["/usr/sbin/lsof", "-nP", "-a", "-iTCP:%d" % port,
+                                  "-sTCP:LISTEN", "-Fpu"], timeout=10)
+            if result.returncode != 0:
+                continue
+            owners, current = {}, None
+            for line in (result.stdout or "").splitlines():
+                if re.fullmatch(r"p[0-9]+", line):
+                    current = int(line[1:])
+                    owners[current] = None
+                elif re.fullmatch(r"u[0-9]+", line) and current is not None:
+                    owners[current] = int(line[1:])
+            if owners and all(pid in cores and uid == 0 for pid, uid in owners.items()):
+                return "127.0.0.1:%d" % port
+        return None
+
+    def claude_egress(self, url, isolated=False, max_time=8):
+        """Check the same HTTPS endpoint without lifting Claude's isolation first.
+
+        ng_claude blocks the domain's fake-ip while isolated. Use the existing,
+        verified FlClash SOCKS listener for this control-plane check only. Ordinary
+        egress and all TUN/whitelist/guard checks remain independent requirements.
+        """
+        if not isolated:
+            return self.egress(url, max_time=max_time)
+        proxy = self.isolated_proxy()
+        if proxy is None:
+            return None
+        result = self.runner([paths.CURL, "-q", "-s", "--socks5-hostname", proxy,
+                              "--noproxy", "", "--max-time", str(max_time), url], timeout=max_time + 4)
+        return parse_trace(result.stdout) if result.returncode == 0 else None
+
     def direct_bypass(self, interface, target):
         """True if a connection pinned to a physical interface SUCCEEDS (= kill switch broken).
 

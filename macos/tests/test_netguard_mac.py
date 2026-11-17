@@ -238,6 +238,19 @@ class ClaudeMatchTests(unittest.TestCase):
         self.assertFalse(m("/Library/NetGuard/bin/netguard"))
         self.assertFalse(m("/usr/local/bin/claude-monitor"))
         self.assertFalse(m("/Applications/Codex.app/Contents/MacOS/Codex"))
+        self.assertFalse(m("/Library/Developer/CommandLineTools/usr/bin/python3",
+                           "/usr/bin/python3 -I -B /Library/NetGuard/lib/netguard_main.py watch"))
+
+    def test_user_arguments_never_exempt_claude(self):
+        # Isolation must end Claude even when the user's own arguments mention the guards.
+        m = lambda comm, args="": claude.is_claude(comm, args, self.cfg)  # noqa: E731
+        native = "/Users/a/.local/share/claude/versions/2.1.0"
+        self.assertTrue(m(native, native + " --add-dir /Users/a/netguard"))
+        self.assertTrue(m(native, native + " -p 看下 netguard 和 ClaudeGuard 的日志"))
+        app = "/Applications/Claude.app/Contents/MacOS/Claude"
+        self.assertTrue(m(app, app + " --open /Users/a/ClaudeGuard/README.md"))
+        self.assertTrue(m("node", "node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js "
+                                  "--add-dir /Users/a/netguard"))
 
 
 class EnableTests(unittest.TestCase):
@@ -1020,6 +1033,70 @@ class WhitelistAndStatusTests(unittest.TestCase):
         self.assertTrue(st["active_killswitch"])
         with open(paths.STATUS, encoding="utf-8") as stream:
             self.assertEqual(json.load(stream)["observations"]["tun"], "utun5")
+
+
+class WhitelistGuardTests(unittest.TestCase):
+    """The exit guard must never silently stop because the whitelist changed or became empty."""
+
+    def enabled(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        config.save(svc.cfg)
+        svc.enable(out=lambda *_: None)
+        return svc, pr, kills
+
+    def test_empty_whitelist_with_killswitch_locks(self):
+        svc, pr, kills = self.enabled()
+        cfg = dict(svc.cfg)
+        cfg["whitelist"] = []
+        config.save(cfg)  # e.g. edited by hand while the daemon runs
+        svc.tick()
+        guard = svc.read_guard()
+        self.assertTrue(guard["lockdown"])
+        self.assertIn("egress", guard["reason_codes"])
+        self.assertTrue(any("白名单为空" in r for r in guard["reasons"]))
+        self.assertEqual(len(kills), 1)
+
+    def test_cannot_remove_last_entry_while_killswitch_on(self):
+        svc, pr, kills = self.enabled()
+        with self.assertRaises(UserError):
+            svc.whitelist("remove", "203.0.113.10", out=lambda *_: None)
+        self.assertEqual(config.load()["whitelist"], ["203.0.113.10"])
+        svc.whitelist("add", "198.51.100.7", out=lambda *_: None)
+        svc.whitelist("remove", "203.0.113.10", out=lambda *_: None)  # not the last one any more
+        self.assertEqual(config.load()["whitelist"], ["198.51.100.7"])
+
+    def test_last_entry_can_be_removed_while_killswitch_off(self):
+        svc, *_ = make_service(self)
+        config.save(svc.cfg)
+        svc.whitelist("remove", "203.0.113.10", out=lambda *_: None)
+        self.assertEqual(config.load()["whitelist"], [])
+
+    def test_daemon_picks_up_whitelist_added_by_another_process(self):
+        svc, pr, kills = self.enabled()
+        other = service.Service(cfg=config.load(), probes=pr, pf=svc.pf)  # the CLI process
+        other.whitelist("add", "192.0.2.50", out=lambda *_: None)
+        pr.egress_ip = pr.claude_ip = "192.0.2.50"  # switched to the newly added node
+        svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+        self.assertIn("192.0.2.50", svc.cfg["whitelist"])
+        self.assertEqual(kills, [])
+
+    def test_daemon_picks_up_whitelist_removed_by_another_process(self):
+        svc, pr, kills = self.enabled()
+        other = service.Service(cfg=config.load(), probes=pr, pf=svc.pf)
+        other.whitelist("add", "192.0.2.50", out=lambda *_: None)
+        svc.tick()
+        other.whitelist("remove", "203.0.113.10", out=lambda *_: None)
+        svc.tick()  # the exit 203.0.113.10 is no longer allowed
+        self.assertTrue(svc.read_guard()["lockdown"])
+
+    def test_invalid_config_keeps_the_configuration_in_use(self):
+        svc, pr, kills = self.enabled()
+        with open(paths.CONFIG, "w", encoding="utf-8") as stream:
+            stream.write("{ not json")
+        svc.tick()
+        self.assertEqual(svc.cfg["whitelist"], ["203.0.113.10"])
+        self.assertFalse(svc.read_guard()["lockdown"])
 
 
 def shell_scripts():

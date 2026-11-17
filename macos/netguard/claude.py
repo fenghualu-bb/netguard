@@ -1,7 +1,7 @@
 """Find and stop Claude Desktop and Claude Code while NetGuard isolates Claude.
 
 macOS pf cannot filter by program, so isolation means: every Claude process found is
-terminated, and the daemon keeps terminating relaunches every 2 seconds until the
+terminated, and the daemon keeps terminating relaunches every 0.25 seconds until the
 isolation is lifted (Windows uses a per-program WFP block for the same purpose).
 """
 import os
@@ -28,11 +28,27 @@ DOMAINS = (
 )
 
 
+INTERPRETERS = ("python", "node", "bash", "sh", "zsh", "dash", "perl", "ruby", "osascript")
+
+
+def _program(comm, args):
+    """Paths that identify what is running: the executable, plus the script for an interpreter.
+
+    The user's own arguments never count: `claude --add-dir ~/netguard` is still Claude.
+    """
+    found = [comm]
+    if os.path.basename(comm).lower().startswith(INTERPRETERS):
+        for token in args.split()[1:]:
+            if not token.startswith("-"):
+                found.append(token)
+                break
+    return found
+
+
 def is_claude(comm, args, cfg):
     comm = comm or ""
     args = args or ""
-    lowered = (comm + " " + args).lower()
-    if any(word in lowered for word in EXCLUDE):
+    if any(word in path.lower() for path in _program(comm, args) for word in EXCLUDE):
         return False
     exe = comm if comm.startswith("/") else (args.split(" ", 1)[0] if args.startswith("/") else comm)
     for app in cfg["claude_app_paths"]:

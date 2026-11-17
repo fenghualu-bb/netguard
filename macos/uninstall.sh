@@ -17,6 +17,10 @@ if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
     USER_NAME="$(stat -f %Su /dev/console)"
 fi
 
+echo "==> 停止受限本地接口"
+launchctl bootout system/com.netguard.control 2>/dev/null || true
+rm -f /Library/LaunchDaemons/com.netguard.control.plist "$ROOT/control.sock"
+
 echo "==> 移除断网规则并停止后台"
 if [ -x "$ROOT/bin/netguard-recover" ]; then
     "$ROOT/bin/netguard-recover" --stop
