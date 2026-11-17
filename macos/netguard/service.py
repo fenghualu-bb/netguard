@@ -29,6 +29,7 @@ IMMEDIATE = ("egress", "egress_claude")
 EGRESS_FAST = 3  # between full checks, the ordinary exit is re-read this often
 ENFORCE_EVERY = 2
 ENFORCE_ISOLATED = 0.25  # dedicated thread: a relaunched Claude is ended within about a quarter second
+CLEANUP_EVERY = 0.5  # otherwise the same thread looks for leftovers of a quit Claude this often
 GRACE_SECONDS = 180
 PENDING_SECONDS = 120
 SHUTDOWN_WINDOW = 600  # a medium-only lockdown this close before boot came from the shutdown
@@ -58,10 +59,11 @@ def _with_defaults(data, defaults):
 
 class Service:
     def __init__(self, cfg=None, probes=None, pf=None, clock=time.time, notifier=None, killer=None,
-                 sleeper=time.sleep):
+                 sleeper=time.sleep, engine=None):
         self.cfg = cfg if cfg is not None else config.load()
         self.probes = probes or probes_mod.Probes(self.cfg)
         self.pf = pf or pfrules.PF()
+        self.engine = engine or claude.Engine(self.cfg, snapshot=self.probes.processes, roots=self._claude_roots)
         self.clock = clock
         self.sleep = sleeper
         self._notifier = notifier
@@ -101,6 +103,7 @@ class Service:
         self._cfg_stamp = stamp
         self.cfg = cfg
         self.probes.cfg = cfg
+        self.engine.cfg = cfg
         util.log("已重新读取配置（白名单 %d 项）" % len(cfg["whitelist"]), "watch")
         return True
 
@@ -144,25 +147,56 @@ class Service:
         except Exception:
             return False
 
+    def _claude_roots(self):
+        roots = [a.rstrip("/") for a in self.cfg["claude_app_paths"]]
+        home = getattr(self.probes, "user_home", lambda: None)()
+        if home:
+            roots += probes_mod.find_claude_apps(home)
+        return roots
+
     def kill_claude(self):
         if self._killer:
             return self._killer()
-        return claude.kill_now(claude.find(self.probes, self.cfg))
+        return self.engine.isolate_now()
+
+    def cleanup_claude(self):
+        """Leftovers of a quit Claude Desktop (merged from ClaudeExitGuard). Never raises."""
+        user = self.probes.console_user()
+        result = self.engine.cleanup_step(user[1] if user else None)
+        if not result:
+            return None
+        cleaned = [p["name"] for p in result["cleaned"]]
+        failed = [p["name"] for p in result["failed"]]
+        summary = "Claude 已退出，结束了 %d 个残留进程" % len(cleaned)
+        if cleaned:
+            summary += "：" + claude.summarize(cleaned)
+        if failed:
+            summary += "；%d 个未能结束：%s" % (len(failed), claude.summarize(failed))
+        events.add("cleanup", summary, None, result)
+        util.log(summary, "cleanup")
+        self.notify("NetGuard：已清理 Claude 残留进程" if not failed else "NetGuard：有 Claude 残留进程未能结束",
+                    summary[:180], key="cleanup", every=5)
+        return result
 
     def enforcer_loop(self, stop, wait=None):
-        """Dedicated thread: ends Claude every ENFORCE_ISOLATED seconds while isolated.
+        """Dedicated thread: the only place that scans for Claude processes.
 
-        It never waits for a tick (whose exit probes can take seconds), so a relaunched Claude
-        is ended within about a quarter of a second plus process start-up.
+        While isolated it ends Claude every ENFORCE_ISOLATED seconds and never waits for a
+        tick (whose exit probes can take seconds), so a relaunched Claude is ended within
+        about a quarter of a second. Otherwise it cleans up after a quit Claude Desktop.
         """
         wait = wait or stop.wait
         while not stop.is_set():
+            blocked = False
             try:
-                if self.read_state()["claude_block"]:
+                blocked = self.read_state()["claude_block"]
+                if blocked:
                     self.enforce_isolation()
+                else:
+                    self.cleanup_claude()
             except Exception as exc:
-                util.log("隔离执行出错：%s" % exc, "enforcer")
-            wait(ENFORCE_ISOLATED)
+                util.log("Claude 进程检查出错：%s" % exc, "enforcer")
+            wait(ENFORCE_ISOLATED if blocked else CLEANUP_EVERY)
 
     def start_enforcer(self):
         import threading
@@ -592,6 +626,7 @@ class Service:
             "require_global_mode": self.cfg["require_global_mode"],
             "last_event": last[-1] if last else None,
             "source": util.read_json(paths.SOURCE, None),
+            "claude": self.engine.status(),
         }
         util.write_json(paths.STATUS, status, mode=0o644)
         return status
@@ -637,7 +672,9 @@ class Service:
                 blocked = False
                 try:
                     blocked = self.read_state()["claude_block"]
-                    if blocked:
+                    # With forever=True the enforcer thread is the only process scanner; this
+                    # loop used to end Claude as well, doubling the cost while isolated.
+                    if blocked and not forever:
                         self.enforce_isolation()
                 except Exception as exc:
                     util.log("隔离执行出错：%s" % exc, "watch")
@@ -650,7 +687,7 @@ class Service:
                 left = INTERVAL - (self.clock() - start)
                 if left <= 0:
                     break
-                self.sleep(min(ENFORCE_ISOLATED if blocked else ENFORCE_EVERY, left))
+                self.sleep(min(ENFORCE_ISOLATED if blocked and not forever else ENFORCE_EVERY, left))
             if not forever:
                 return
 

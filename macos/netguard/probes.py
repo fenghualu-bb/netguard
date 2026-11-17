@@ -5,7 +5,7 @@ import os
 import re
 import time
 
-from . import paths, util
+from . import paths, procs, util
 
 
 def parse_ps(output):
@@ -93,8 +93,10 @@ class Probes:
 
     # ---- processes ----
     def processes(self):
-        out = self.runner([paths.PS, "-axww", "-o", "pid=,uid=,rgid=,comm="]).stdout
-        return parse_ps(out)
+        """Kernel process table (libproc, ~3 ms); `ps` only where libproc is unavailable."""
+        if procs.available():
+            return procs.snapshot()
+        return procs.ps_snapshot(self.runner)
 
     def process_args(self):
         return parse_ps_args(self.runner([paths.PS, "-axww", "-o", "pid=,args="]).stdout)
@@ -278,6 +280,8 @@ class Probes:
         """Start time of the console user's Dock (the macOS analogue of explorer.exe)."""
         for row in self.processes():
             if row["uid"] == uid and os.path.basename(row["comm"]) == "Dock":
+                if row.get("start"):
+                    return int(row["start"][0])
                 out = self.runner([paths.PS, "-o", "etime=", "-p", str(row["pid"])]).stdout
                 elapsed = parse_etime(out)
                 if elapsed is not None:

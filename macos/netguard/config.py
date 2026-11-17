@@ -37,6 +37,9 @@ DEFAULTS = {
     "anthropic_v4": ANTHROPIC_V4,
     "anthropic_v6": ANTHROPIC_V6,
     "claude_app_paths": ["/Applications/Claude.app"],
+    # After Claude Desktop quits, end what it left behind (from ClaudeExitGuard):
+    # "full" = also a stand-alone Claude Code, "desktop" = only Desktop's leftovers, "off".
+    "claude_cleanup": "full",
     "require_claudeguard": True,
     # Public addresses used only to prove that a direct physical-interface connection fails.
     "bypass_probe_targets": ["1.1.1.1", "1.0.0.1"],
@@ -92,6 +95,8 @@ def validate(data):
         raise ConfigError("config_version 必须是整数")
     if cfg["block_lan_dns"] not in (True, False, "auto"):
         raise ConfigError('block_lan_dns 只能是 true、false 或 "auto"')
+    if cfg["claude_cleanup"] not in ("full", "desktop", "off"):
+        raise ConfigError('claude_cleanup 只能是 "full"、"desktop" 或 "off"')
     targets = []
     for value in cfg["bypass_probe_targets"]:
         addr = ipaddress.ip_address(str(value))
