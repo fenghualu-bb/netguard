@@ -129,6 +129,70 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(eng.classify()["entries"], [])
 
 
+class PersistenceTests(unittest.TestCase):
+    """A restarted daemon (an upgrade) still knows which orphans Claude started."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.store = os.path.join(self.tmp, "claude-tracked.json")
+
+    def engine(self, w):
+        return claude.Engine(config.validate({}), snapshot=w.snapshot, sender=w.send, clock=w.clock,
+                             args_of=lambda pid: [], roots=lambda: [APP], own_pid=lambda: 99999, store=self.store)
+
+    def test_orphans_are_recognised_after_a_restart(self):
+        w = World(desktop_tree())
+        self.engine(w).classify()
+        for pid in (10, 11, 12):
+            w.exit(pid)  # Claude quits; its shell, node and python are re-parented to launchd
+        view = self.engine(w).classify()  # a new daemon
+        self.assertEqual({e["row"]["pid"]: (e["role"], e["origin"]) for e in view["entries"]},
+                         {13: ("descendant", "desktop"), 14: ("descendant", "desktop"), 15: ("descendant", "desktop")})
+        result = None
+        for _ in range(12):
+            result = self.engine_cleanup(w) or result
+        self.assertEqual(sorted(p["pid"] for p in result["cleaned"]), [13, 14, 15])
+
+    def engine_cleanup(self, w):
+        if not hasattr(self, "_eng"):
+            self._eng = self.engine(w)
+        out = self._eng.cleanup_step(UID)
+        w.t += 0.5
+        return out
+
+    def test_a_reused_pid_is_not_trusted(self):
+        w = World(desktop_tree())
+        self.engine(w).classify()
+        for pid in (10, 11, 12, 13, 14, 15):
+            w.exit(pid)
+        w.rows[13] = row(13, 1, "/bin/zsh", start=(5555, 0))  # same pid and path, another start time
+        self.assertEqual(self.engine(w).classify()["entries"], [])
+
+    def test_written_only_when_the_set_changes_and_root_only(self):
+        from unittest import mock
+        from netguard import util
+        w = World(desktop_tree())
+        eng = self.engine(w)
+        with mock.patch.object(util, "write_json", wraps=util.write_json) as write:
+            eng.classify()
+            eng.classify()
+            eng.classify()
+            self.assertEqual(write.call_count, 1)
+            w.rows[16] = row(16, 13, "/bin/sleep")
+            eng.classify()
+            self.assertEqual(write.call_count, 2)
+        self.assertEqual(oct(os.stat(self.store).st_mode & 0o777), "0o600")
+
+    def test_a_damaged_store_is_ignored(self):
+        for text in ("not json", "{}", '[{"pid": "x"}]', '[{"pid": 13, "start": [1013], "path": "/bin/zsh"}]'):
+            with self.subTest(text=text):
+                with open(self.store, "w") as stream:
+                    stream.write(text)
+                w = World([row(13, 1, "/bin/zsh")])
+                self.assertEqual(self.engine(w).classify()["entries"], [])
+
+
 class IsolationTests(unittest.TestCase):
     def test_isolation_kills_everything_including_updater_and_children(self):
         w = World(desktop_tree() + [row(20, 1, SHIPIT), row(21, 1, NATIVE),

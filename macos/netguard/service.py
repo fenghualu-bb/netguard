@@ -69,7 +69,8 @@ class Service:
         self.cfg = cfg if cfg is not None else config.load()
         self.probes = probes or probes_mod.Probes(self.cfg)
         self.pf = pf or pfrules.PF()
-        self.engine = engine or claude.Engine(self.cfg, snapshot=self.probes.processes, roots=self._claude_roots)
+        self.engine = engine or claude.Engine(self.cfg, snapshot=self.probes.processes, roots=self._claude_roots,
+                                             store=paths.CLAUDE_TRACKED)
         self.clock = clock
         self.sleep = sleeper
         self._notifier = notifier

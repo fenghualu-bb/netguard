@@ -45,4 +45,5 @@ OSASCRIPT = "/usr/bin/osascript"
 SUDO = "/usr/bin/sudo"
 DSCACHEUTIL = "/usr/bin/dscacheutil"
 DIG = "/usr/bin/dig"
+CLAUDE_TRACKED = p("claude-tracked.json")  # Claude-started processes, kept across daemon restarts
 SOURCE = p("source.json")  # repository path and commit recorded by install.sh (for the app's update button)

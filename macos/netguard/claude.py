@@ -139,7 +139,7 @@ class Engine:
     """Classifies the process table and ends Claude processes. Thread-safe."""
 
     def __init__(self, cfg, snapshot=None, args_of=None, sender=None, clock=time.monotonic,
-                 roots=None, own_pid=os.getpid):
+                 roots=None, own_pid=os.getpid, store=None):
         self.cfg = cfg
         self.snapshot = snapshot or procs_mod.snapshot
         self.args_of = args_of or procs_mod.arguments
@@ -158,6 +158,45 @@ class Engine:
         self.batch = {"cleaned": [], "failed": []}
         self.last_cleanup = None
         self.last = {"main_running": False, "entries": [], "at": 0}
+        # Which processes Claude started is known only while their parent lives. Persisting the
+        # tracked identities lets a restarted daemon (an upgrade) still recognise children that
+        # were re-parented to launchd. pid + start time + path rule out a reused pid.
+        self.store = store
+        self._saved = None
+        self._load()
+
+    # ---------------------------------------------------------------- persistence
+    def _load(self):
+        if not self.store:
+            return
+        from . import util
+        data = util.read_json(self.store, None)
+        if not isinstance(data, list):
+            return
+        for item in data:
+            try:
+                start = item["start"]
+                key = (int(item["pid"]), (int(start[0]), int(start[1])), str(item["path"]))
+                origin = item["origin"] if item["origin"] in ("desktop", "cli") else "desktop"
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+            self.tracked[key] = origin
+        self._saved = set(self.tracked)
+
+    def _persist(self):
+        """Write the tracked identities when the set changed (root-only file)."""
+        if not self.store:
+            return
+        keys = set(k for k in self.tracked if k[1] is not None)
+        if keys == self._saved:
+            return
+        from . import util
+        try:
+            util.write_json(self.store, [{"pid": k[0], "start": list(k[1]), "path": k[2], "origin": self.tracked[k]}
+                                         for k in sorted(keys)], mode=0o600)
+            self._saved = keys
+        except OSError:
+            pass
 
     # ---------------------------------------------------------------- classify
     def _argv(self, row):
@@ -217,6 +256,7 @@ class Engine:
                 changed = True
         for key, entry in found.items():
             self.tracked[key] = entry["origin"]
+        self._persist()
         entries = sorted(found.values(), key=lambda e: e["row"]["pid"])
         self.last = {"main_running": any(e["role"] == "main" for e in entries), "entries": entries,
                      "at": time.time()}
