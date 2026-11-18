@@ -741,7 +741,7 @@ class Service:
             "claude_table": self._claude_table["count"] if state["claude_block"] else None,
             "realip": bool(state["claude_block"] and not guard.get("lockdown")),
             "dns_block": bool(state.get("dns_block")),
-            "guard": {k: guard.get(k) for k in ("enabled", "lockdown", "since", "reasons", "bad_streak",
+            "guard": {k: guard.get(k) for k in ("enabled", "lockdown", "since", "reasons", "reason_codes", "bad_streak",
                                                 "last_check", "last_findings", "triggers", "grace_until",
                                                 "duration")},
             "confirm": CONFIRM, "interval": INTERVAL,

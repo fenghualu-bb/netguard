@@ -27,6 +27,7 @@ struct NGGuard: Decodable {
     var lockdown: Bool?
     var since: Double?
     var reasons: [String]?
+    var reason_codes: [String]?
     var last_check: Double?
     var last_findings: [String]?
     var triggers: Double?
@@ -75,6 +76,38 @@ struct NGObs: Decodable {
     var flclash: NGFlClash?
     var claudeguard: NGClaudeGuard?
     var exempt_others: [String]?
+    var proxy_up: Bool?
+    var proxy_down_direct: Bool?
+}
+
+struct NGClaudeProc: Decodable {
+    var pid: Double?
+    var name: String?
+    var role: String?
+    var origin: String?
+    var path: String?
+}
+
+struct NGCleanup: Decodable {
+    var at: Double?
+    var cleaned: [NGClaudeProc]?
+    var failed: [NGClaudeProc]?
+}
+
+struct NGClaude: Decodable {
+    var main_running: Bool?
+    var count: Double?
+    var processes: [NGClaudeProc]?
+    var policy: String?
+    var cleaning: Double?
+    var checked_at: Double?
+    var last_cleanup: NGCleanup?
+}
+
+struct NGDirectCheck: Decodable {
+    var at: Double?
+    var via: String?
+    var moved: [String]?
 }
 
 struct NGSource: Decodable {
@@ -116,9 +149,17 @@ struct NGStatus: Decodable {
     var interval: Double?
     var lastEvent: NGEvent?
     var source: NGSource?
+    var claude: NGClaude?
+    var proxyDown: String?
+    var direct: Bool?
+    var directBlock: Double?
+    var directCheck: NGDirectCheck?
 
     enum CodingKeys: String, CodingKey {
-        case version, integrity, observations, whitelist, interval, realip, source
+        case version, integrity, observations, whitelist, interval, realip, source, claude, direct
+        case proxyDown = "proxy_down"
+        case directBlock = "direct_block"
+        case directCheck = "direct_check"
         case updatedAt = "updated_at"
         case wantedKillswitch = "wanted_killswitch"
         case killswitchComplete = "killswitch_complete"
@@ -176,8 +217,29 @@ let eventNames: [String: String] = [
     "release_refused": "解除被拒", "grace": "宽限暂缓", "config": "设置", "isolate": "隔离 Claude",
     "unisolate": "解除隔离", "rules_restored": "规则恢复", "rollback": "自动回滚", "recover": "紧急恢复",
     "kill": "结束 Claude", "guard_error": "检查出错", "info": "信息", "dns_relaxed": "放行局域网 DNS",
-    "exempt": "放行身份被占用",
+    "exempt": "放行身份被占用", "cleanup": "清理 Claude 残留", "anthropic_moved": "主站地址变化",
 ]
+
+let roleNames: [String: String] = [
+    "main": "桌面版", "helper": "辅助进程", "updater": "更新程序", "cli": "Claude Code", "descendant": "子进程",
+]
+
+let cleanupNames: [String: String] = [
+    "full": "清理残留，并结束单独运行的 Claude Code", "desktop": "只清理桌面版的残留", "off": "不清理",
+]
+
+/// "Claude Helper ×3、zsh ×2"
+func summarizeNames(_ procs: [NGClaudeProc]) -> String {
+    var counts: [String: Int] = [:]
+    var order: [String] = []
+    for p in procs {
+        let n = p.name ?? "?"
+        if counts[n] == nil { order.append(n) }
+        counts[n, default: 0] += 1
+    }
+    return order.sorted { counts[$0]! > counts[$1]! }
+        .map { counts[$0]! > 1 ? "\($0) ×\(counts[$0]!)" : $0 }.joined(separator: "、")
+}
 
 /// Quote for /bin/sh inside an AppleScript string literal.
 func shellQuote(_ s: String) -> String {
@@ -192,6 +254,8 @@ final class Model: ObservableObject {
     @Published var busy = false
     @Published var guiUpdateMessage = "启动时自动检查；保护组件变更会暂缓更新。"
     private var timer: Timer?
+    /// Last cleanup already shown, so a restart of the menu app never replays an old alert.
+    private var lastCleanupSeen = UserDefaults.standard.double(forKey: "lastCleanupSeen")
 
     init() {
         reload()
@@ -211,6 +275,7 @@ final class Model: ObservableObject {
             do {
                 status = try decoder.decode(NGStatus.self, from: data)
                 decodeError = nil
+                announceCleanup()
             } catch {
                 status = nil
                 decodeError = "status.json 无法解析：\(error)"
@@ -226,6 +291,22 @@ final class Model: ObservableObject {
         }
     }
 
+    /// On-screen alert after a cleanup (from ClaudeExitGuard): no notification permission needed.
+    private func announceCleanup() {
+        guard let c = status?.claude?.last_cleanup, let at = c.at, at > lastCleanupSeen else { return }
+        let fresh = Date().timeIntervalSince1970 - at < 60
+        lastCleanupSeen = at
+        UserDefaults.standard.set(at, forKey: "lastCleanupSeen")
+        if fresh { showCleanupPanel(c) }
+    }
+
+    /// Direct mode with the proxy off: Claude is isolated on purpose and lifts itself later.
+    var proxyOffIsolation: Bool {
+        guard let g = status?.guardInfo, g.lockdown == true else { return false }
+        let codes = Set(g.reason_codes ?? [])
+        return codes.contains("proxy_down") && codes.isSubset(of: ["proxy_down", "core", "tun"])
+    }
+
     var age: Double {
         guard let u = status?.updatedAt else { return .infinity }
         return Date().timeIntervalSince1970 - u
@@ -233,6 +314,7 @@ final class Model: ObservableObject {
 
     var overall: Overall {
         guard let s = status, age < 60 else { return .stale }
+        if proxyOffIsolation { return .warn }
         if s.guardInfo?.lockdown == true { return .bad }
         if s.wantedKillswitch == true && s.killswitchComplete != true { return .bad }
         if s.wantedKillswitch != true { return .off }
@@ -246,6 +328,7 @@ final class Model: ObservableObject {
         if let e = decodeError { return e }
         guard let s = status else { return "NetGuard 后台未运行（没有状态文件）" }
         if age >= 60 { return "状态已 \(Int(age)) 秒未更新：后台可能已停止" }
+        if proxyOffIsolation { return "代理已断开：浏览器等可直连，Claude 已隔离（代理恢复且检查通过后自动解除）" }
         if s.guardInfo?.lockdown == true { return "已锁定 Claude：" + (s.guardInfo?.reasons ?? []).joined(separator: "；") }
         if s.wantedKillswitch == true && s.killswitchComplete != true { return "断网保护不完整！" }
         if s.wantedKillswitch != true { return "断网保护未开启" }
@@ -342,6 +425,45 @@ final class Model: ObservableObject {
     }
 }
 
+var cleanupPanel: NSPanel?
+
+/// A floating panel for about 12 seconds with a sound, like ClaudeExitGuard's alert.
+func showCleanupPanel(_ c: NGCleanup) {
+    let cleaned = c.cleaned ?? []
+    let failed = c.failed ?? []
+    let title = failed.isEmpty ? "Claude 已退出：结束了 \(cleaned.count) 个残留进程"
+                               : "有 \(failed.count) 个 Claude 残留进程未能结束"
+    var detail = cleaned.isEmpty ? "" : summarizeNames(cleaned)
+    if !failed.isEmpty { detail += (detail.isEmpty ? "" : "\n") + "未能结束：" + summarizeNames(failed) }
+    cleanupPanel?.close()
+    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 96),
+                        styleMask: [.titled, .closable, .nonactivatingPanel, .utilityWindow],
+                        backing: .buffered, defer: false)
+    panel.title = "NetGuard"
+    panel.level = .floating
+    panel.isReleasedWhenClosed = false
+    panel.hidesOnDeactivate = false
+    panel.contentView = NSHostingView(rootView:
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: failed.isEmpty ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 26)).foregroundColor(failed.isEmpty ? .green : .orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(detail).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }.padding(12).frame(width: 400))
+    if let screen = NSScreen.main?.visibleFrame {
+        panel.setFrameTopLeftPoint(NSPoint(x: screen.maxX - 420, y: screen.maxY - 12))
+    }
+    panel.orderFrontRegardless()
+    NSSound(named: failed.isEmpty ? "Glass" : "Basso")?.play()
+    cleanupPanel = panel
+    DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak panel] in
+        if cleanupPanel === panel { panel?.close() }
+    }
+}
+
 func showResult(_ ok: Bool, _ text: String) {
     let alert = NSAlert()
     alert.messageText = ok ? "完成" : "未完成"
@@ -418,14 +540,20 @@ struct OverviewView: View {
                         Spacer()
                         VStack(alignment: .trailing) {
                             Text("当前出口").font(.caption).foregroundColor(.secondary)
-                            Text(o?.egress ?? "未取得").font(.system(.title2, design: .monospaced)).bold()
-                                .foregroundColor(o?.egress_ok == true ? .green : .red)
+                            Text(o?.proxy_down_direct == true ? "代理已断开" : (o?.egress ?? "未取得"))
+                                .font(.system(.title2, design: .monospaced)).bold()
+                                .foregroundColor(o?.proxy_down_direct == true ? .orange : (o?.egress_ok == true ? .green : .red))
                         }
                     }
                     HStack(alignment: .top, spacing: 12) {
                         Card(title: "出口 IP") {
-                            Line(label: "普通流量", value: o?.egress ?? "未取得", ok: o?.egress_ok)
-                            Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
+                            if o?.proxy_down_direct == true {
+                                Line(label: "普通流量", value: "代理已断开，其他程序直连（不探测真实出口）")
+                                Line(label: "claude.ai", value: "Claude 已隔离，Anthropic 网段只能经代理访问")
+                            } else {
+                                Line(label: "普通流量", value: o?.egress ?? "未取得", ok: o?.egress_ok)
+                                Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
+                            }
                             Line(label: "白名单", value: (s?.whitelist ?? []).isEmpty ? "空" : (s?.whitelist ?? []).joined(separator: ", "))
                         }
                         Card(title: "自动防护") {
@@ -468,7 +596,32 @@ struct OverviewView: View {
                             Line(label: "严格路由", value: "由 NetGuard pf 规则承担（macOS 无需 strict-route）")
                         }
                     }
+                    Card(title: "Claude 进程") {
+                        let c = s?.claude
+                        let procs = c?.processes ?? []
+                        Line(label: "桌面版", value: c?.main_running == true ? "运行中" : "未运行")
+                        Line(label: "相关进程", value: procs.isEmpty ? "无" : "\(Int(c?.count ?? 0)) 个：" + summarizeNames(procs))
+                        Line(label: "退出后清理", value: cleanupNames[c?.policy ?? ""] ?? "—")
+                        if let last = c?.last_cleanup {
+                            Line(label: "上次清理", value: "\(fmtTime(last.at))：结束 \((last.cleaned ?? []).count) 个"
+                                 + ((last.failed ?? []).isEmpty ? "" : "，\((last.failed ?? []).count) 个未能结束"),
+                                 ok: (last.failed ?? []).isEmpty)
+                        }
+                        if !procs.isEmpty {
+                            DisclosureGroup("进程明细") {
+                                ForEach(Array(procs.enumerated()), id: \.offset) { _, p in
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text("\(Int(p.pid ?? 0))").font(.system(.caption, design: .monospaced)).frame(width: 56, alignment: .leading)
+                                        Text(roleNames[p.role ?? ""] ?? (p.role ?? "")).font(.caption).frame(width: 70, alignment: .leading)
+                                        Text(p.path ?? "").font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
+                                            .help(p.path ?? "")
+                                    }
+                                }
+                            }.font(.caption)
+                        }
+                    }
                     Card(title: "断网保护（NetGuard）") {
+                        Line(label: "代理断开时", value: s?.proxyDown == "direct" ? "允许直连（Claude 立即隔离）" : "整机断网")
                         Line(label: "规则", value: s?.wantedKillswitch == true ? (s?.killswitchComplete == true ? "已开启 / \(Int(i?.rule_count ?? 0)) 条规则完整" : "已开启但不完整") : "未开启",
                              ok: s?.wantedKillswitch == true ? s?.killswitchComplete == true : nil)
                         Line(label: "pf / token", value: "\(i?.pf_enabled == true ? "已启用" : "未启用") / 锚点引用\(i?.main_anchor_ref == true ? "存在" : "缺失") / token \(i?.token_live == true ? "有效" : "无")")
@@ -630,6 +783,45 @@ struct MaintenanceView: View {
                         }.disabled(newIP.trimmingCharacters(in: .whitespaces).isEmpty)
                         Button("从 ClaudeGuard 导入") { model.admin(["whitelist", "import-claudeguard"]) }
                     }
+                }
+                Card(title: "代理断开时") {
+                    let direct = model.status?.proxyDown == "direct"
+                    Line(label: "当前", value: direct
+                         ? "允许直连：浏览器等程序用真实 IP 上网；Claude 立即隔离，代理恢复且检查通过后自动解除"
+                         : "整机断网：只剩局域网可用，任何程序都不会用真实 IP 联网")
+                    HStack {
+                        Button("整机断网（默认）") {
+                            if confirm("代理断开时整机断网？", "代理一断，整台电脑只剩局域网可用。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
+                                model.admin(["proxy-down", "block"])
+                            }
+                        }.disabled(!direct)
+                        Button("允许直连") {
+                            if confirm("代理断开时允许直连？", "代理断开后，浏览器等程序会用真实 IP 上网；Claude 会被立即隔离，Anthropic 网段和 Claude 的其他已知地址仍只能经代理访问。\n\n建议关代理前先退出 Claude、关闭 claude.ai 网页。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
+                                model.admin(["proxy-down", "direct"])
+                            }
+                        }.disabled(direct)
+                    }
+                    if direct {
+                        let check = model.status?.directCheck
+                        Line(label: "拦截表", value: "Claude 的其他地址 \(Int(model.status?.directBlock ?? 0)) 个")
+                        Line(label: "主站网段", value: check == nil ? "尚未核对" :
+                             ((check?.moved ?? []).isEmpty ? "在 Anthropic 网段内（\(fmtTime(check?.at)) 核对）"
+                                                           : "不在官方网段：" + (check?.moved ?? []).joined(separator: "、")),
+                             ok: check == nil ? nil : (check?.moved ?? []).isEmpty)
+                    }
+                }
+                Card(title: "Claude 退出后清理") {
+                    let policy = model.status?.claude?.policy ?? "full"
+                    Line(label: "当前", value: cleanupNames[policy] ?? policy)
+                    HStack {
+                        ForEach(["full", "desktop", "off"], id: \.self) { p in
+                            Button(["full": "清理残留和 Claude Code", "desktop": "只清理桌面版残留", "off": "不清理"][p]!) {
+                                model.admin(["cleanup", p])
+                            }.disabled(policy == p)
+                        }
+                    }
+                    Text("桌面版退出后，结束它留下的辅助进程、Claude Code 和它们启动的 shell、MCP 服务等。桌面版运行时一律放行；更新程序不会被打断。")
+                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Card(title: "自动防护") {
                     HStack {
