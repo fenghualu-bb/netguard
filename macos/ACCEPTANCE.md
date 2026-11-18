@@ -26,6 +26,10 @@ CI（GitHub Actions 的一次性 macOS 15 虚拟机）已经验证过 pf 规则�
 | 18 | 界面更新按钮 | 维护页点“检查并安全更新界面” | 没有新版本时提示“当前没有新版本”；有仅涉及界面的新版本时弹出系统密码框，只替换界面，断网规则和后台不重启；涉及保护组件时提示需完整升级 | 未运行 |
 | 19 | 免密解除锁定 | 锁定状态下在工作台点“解除锁定”；再在终端运行 `/Library/NetGuard/bin/netguard-control release` | 工作台：检查通过才解除，不弹密码框；终端直接运行：被拒绝（“只接受 NetGuard 界面发起的请求”），保持锁定 | 未运行 |
 | 20 | 白名单变更 | 断网保护开启时，在工作台添加一个新 IP；之后把白名单删到只剩一项，再尝试删除这最后一项 | 添加后 10 秒内后台就使用新白名单（无需重启后台）；最后一项拒绝删除 | 未运行 |
+| 21 | 直连模式开启 | 代理正常时在维护页“代理断开时”选“允许直连”（或 `sudo /Library/NetGuard/bin/netguard proxy-down direct`），然后 `sudo /Library/NetGuard/bin/netguard verify` | 显示“断网保护已开启（直连模式）”；verify 全部 ✅，含“Claude 其他地址拦截表”“Claude 主站解析在 Anthropic 网段内”“绑定 en0 访问拦截表中的地址被拒绝” | 未运行 |
+| 22 | 直连模式：关代理 | 先退出 Claude、关闭 claude.ai 网页，再退出 FlClash；然后用浏览器打开一个普通网站，运行 `curl -m 5 https://claude.ai/cdn-cgi/trace`，再试着打开 Claude 桌面版和 `claude` | 普通网站能打开；curl 失败；Claude 桌面版和 `claude` 立即被结束；菜单栏橙色、工作台显示“代理已断开：浏览器等可直连，Claude 已隔离” | 未运行 |
+| 23 | 直连模式：代理恢复 | 第 22 项之后重新打开 FlClash，等 20 秒 | 收到“NetGuard：代理已恢复”通知，自动解除隔离，保护记录有一条“代理已恢复：全部检查通过，自动解除”；Claude 可以正常打开 | 未运行 |
+| 24 | 退出后清理（取代 ClaudeExitGuard） | 在 Claude Code 里运行一个后台命令（例如 `sleep 600 &`），然后按 ⌘Q 退出 Claude 桌面版，再运行 `pgrep -fl "sleep 600"` | 约 2–4 秒后弹出“Claude 已退出：结束了 N 个残留进程”并有提示音；pgrep 没有输出；工作台“Claude 进程”显示上次清理。通过后可用 ClaudeExitGuard 自带的 `scripts/uninstall.sh` 卸载它 | 未运行 |
 
 本文件是验收**模板**，提交到 Git 的版本保持“未运行”。本机的验收结果、证据文件名和本机路径记在仓库以外的地方，不要提交。
 

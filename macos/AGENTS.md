@@ -24,8 +24,9 @@ stop only at the few points listed under "When to involve the user".
    the desktop user, never with sudo): ClaudeGuard 61b61e1 cannot find the native Claude Code installer's
    flat `~/.local/share/claude/versions/<version>` files ("Hands off to: NOT FOUND"). `install.sh` applies
    it automatically; re-run it after reinstalling ClaudeGuard, then `claudeguard doctor`.
-4. Never use `disable`, `guard-off`, `recover`, DIRECT mode, a wider whitelist or a longer grace period to
-   make a failure disappear. Diagnose read-only first (`netguard status`, `netguard events -n 50`,
+4. Never use `disable`, `guard-off`, `recover`, DIRECT mode, `proxy-down direct`, `cleanup off`, a wider
+   whitelist or a longer grace period to make a failure disappear. Switching `proxy-down` or `cleanup` is the
+   user's decision only. Diagnose read-only first (`netguard status`, `netguard events -n 50`,
    `/Library/NetGuard/netguard.log`). Lift a lockdown only with `netguard release`.
 5. Never run `macos/ci/integration.sh` on the user's Mac (it is for disposable CI VMs only).
 6. Do not commit runtime files, node/subscription data, tokens or the user's IPs.

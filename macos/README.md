@@ -20,11 +20,14 @@ Windows 版 NetGuard 的 macOS 适配版：给 Claude 用的**断网保护（kil
 | 断网保护 | 拦截所有出站流量，只放行：进入 FlClash TUN 的流量、FlClash 内核自己的流量、局域网/链路本地/组播、回环。代理或 TUN 一掉，整机只能访问局域网，**不会退回用真实 IP 直连**。 |
 | Anthropic 网段硬拦截 | 发往 Anthropic 官方网段（160.79.104.0/23、153.61.224.0/22、2607:6bc0::/48）的流量，**只要不是从 TUN 出去的一律拒绝**，连 FlClash 内核也不例外。所以即使 FlClash 规则把 Claude 误设为 DIRECT，也连不上。Windows 版没有这一层。 |
 | 自动防护 | 每 10 秒检查一次：普通出口和 claude.ai 出口是否在白名单、断网规则是否完整、有没有其他程序的 pf 放行规则能越过断网保护（排在 NetGuard 之前的 quick 放行，或排在它之后的放行）、FlClash 内核是否以 root 运行、TUN 是否在线且公网流量真的经过它、FlClash 是否为**全局模式**、ClaudeGuard 是否在运行且保护开启、它的 root 网络助手是否在运行、`claude` 命令和桌面版是否仍挂在 ClaudeGuard 上。连续 2 次异常就**锁定**；但**出口不在白名单**（普通出口或 claude.ai 出口）第一次发现就锁定，不等第二次。两次完整检查之间，每 3 秒还会快速读一次普通出口，发现变了立即做完整检查，所以换节点后约 3～5 秒内结束 Claude（原来最长约 20 秒）。 |
-| 锁定 / 隔离 | 立即结束 Claude 桌面版和 Claude Code，之后由独立线程**每 0.25 秒**检查一次并直接强制结束（与 Windows Stop-Process -Force 相同），重新打开也会被结束；同时在 TUN 内也拒绝 Claude：Anthropic 官方网段连 TUN 也拒绝；FlClash 用 fake-ip 时 Claude 域名解析到的是 198.18.x.x 代理地址，看不到真实网段，所以后台还会向 FlClash 查询 Claude 常用域名的代理地址，放进 pf 地址表 `ng_claude` 一并拒绝（每 60 秒刷新）。直到你在工作台点“解除锁定”。解除前会重新做全部检查，有一项不通过就拒绝解除。 |
+| 锁定 / 隔离 | 立即结束 Claude 桌面版、Claude Code，**以及它们启动的全部子进程**（shell、node/python MCP 服务、开发服务器等，父进程退出后也继续跟踪），之后由独立线程**每 0.25 秒**检查一次并直接强制结束（与 Windows Stop-Process -Force 相同），重新打开也会被结束；同时在 TUN 内也拒绝 Claude：Anthropic 官方网段连 TUN 也拒绝；FlClash 用 fake-ip 时 Claude 域名解析到的是 198.18.x.x 代理地址，看不到真实网段，所以后台还会向 FlClash 查询 Claude 常用域名的代理地址，放进 pf 地址表 `ng_claude` 一并拒绝（每 60 秒刷新）。直到你在工作台点“解除锁定”。解除前会重新做全部检查，有一项不通过就拒绝解除。 |
 | 宽限期 | 开机、登录、睡眠唤醒后 180 秒内，中危异常（内核/TUN/ClaudeGuard 还没起来）只记录一条，不锁定；高危异常照常锁定。与 Windows 1.3.5 相同。 |
 | 关机锁定自动解除 | 关机或重启时，macOS 会先退出 FlClash 和 ClaudeGuard，再停止 NetGuard 后台，后台因此会在关机过程中触发一次锁定。如果这次锁定**只由中危异常引起**，并且发生在本次开机前 10 分钟内，开机后后台会反复做与“解除锁定”完全相同的检查（两个出口都在白名单、断网规则完整、内核和 TUN 正常、ClaudeGuard 在运行），全部通过才自动解除，并留下记录。高危锁定（出口不在白名单、规则不完整）仍然必须手动解除。 |
 | 真实 IP 模式 | 工作台里有三步向导（与 Windows 相同）：隔离 Claude → 处理你的事情 → 核对出口回到白名单后退出。 |
 | 局域网 DNS | 默认 `auto`：开启断网保护时先**拦截**发往路由器的 DNS（与 Windows 相同）；如果这台 Mac 的系统 DNS 就是路由器、拦了就无法解析，则自动放行并记录。之后换了 Wi‑Fi、DNS 变得不可用时，后台也会自动放行，**绝不让你失去 DNS**。 |
+| 代理断开时（可选） | 默认“整机断网”。可改为“允许直连”：代理一断，浏览器等程序用真实 IP 正常上网；Claude 在第一次发现时就被隔离（开机宽限期内也一样，后台每 3 秒看一次 TUN），代理恢复且全部检查通过后自动解除。Anthropic 官方网段和 Claude 其他已知地址（静态资源、CDN、用户内容、统计上报，表 `ng_direct`，每 10 分钟经代理用 DoH 解析一次，代理断开时用系统 DNS 补充）不走代理一律拒绝；同时核对 claude.ai 等主站仍解析在 Anthropic 网段内，不在就加入拦截表并锁定。见下方“代理断开时允许直连”。 |
+| 退出后清理（来自 ClaudeExitGuard） | Claude 桌面版退出后，结束它留下的辅助进程、内置 Claude Code 和它们启动的子进程；默认也结束单独运行的 Claude Code（`claude_cleanup`：`full` / `desktop` / `off`）。先 SIGTERM，1 秒后仍在再 SIGKILL，每次发信号前核对 PID、启动时间和程序路径，防止误杀复用了 PID 的其他程序；桌面版运行时一律放行；更新程序 ShipIt 不打断；只处理当前桌面用户自己的进程。菜单栏会弹出约 12 秒的提醒并播放提示音，保护记录里有一条“清理 Claude 残留”。 |
+| 识别 Claude | 按内核报告的程序真实路径识别（不看命令行文字，参数里写什么都骗不过），再沿真实进程树跟踪子孙进程。进程表直接从内核读取（libproc），读一次约 3 毫秒，比启动一次 `ps`（约 25 毫秒）省得多。 |
 | 放行身份监测 | 每分钟检查是否有其他程序以“root + 你的用户组”身份联网（与 FlClash 内核共用放行身份），发现就记录并通知。Windows 版没有这项检查。 |
 | 界面 | 菜单栏盾牌图标（绿=当前检查通过，黄=保护未开，橙=有异常或真实 IP 模式，红=锁定/规则不完整，灰=后台没运行）。工作台与 Windows 布局一致：概览（当前出口、出口 IP、自动防护、ClaudeGuard、FlClash、断网保护、最近操作）、保护记录（可筛选）、维护（白名单、自动防护、完整自检、修复 ClaudeGuard、更新、卸载、日志、急救）。系统通知会提示锁定、代理未就绪、DNS 放行和放行身份被占用。 |
 
@@ -115,6 +118,8 @@ sudo /Library/NetGuard/bin/netguard disable      # 关闭断网保护（同时�
 sudo /Library/NetGuard/bin/netguard isolate      # 真实 IP 模式：隔离 Claude
 sudo /Library/NetGuard/bin/netguard unisolate    # 退出（出口需回到白名单）
 sudo /Library/NetGuard/bin/netguard guard-off    # 关闭自动防护（规则不变）
+sudo /Library/NetGuard/bin/netguard proxy-down direct   # 代理断开时允许直连（block = 整机断网，默认）
+sudo /Library/NetGuard/bin/netguard cleanup desktop     # 退出后清理：full / desktop / off
 ```
 工作台里的“刷新状态”只读取后台已写出的最新状态，不需要密码；后台仍每 10 秒检查一次。
 “解除锁定”通过一次管理员授权安装的受限本地服务，请求原有 `netguard release`：双出口、白名单、TUN、
@@ -132,6 +137,29 @@ ClaudeGuard 和规则完整性检查保持不变，有一项不通过就保持�
 本地接口为 `/Library/NetGuard/control.sock`（仅桌面用户可访问，模式 0600），由 root 的
 `com.netguard.control` LaunchDaemon 提供，程序位于 root 所有的安装目录。
 服务不可用时明确报错，不回退到跳过检查或关闭保护；CLI 的原有 root 命令权限不变。
+
+## 代理断开时允许直连（可选）
+
+默认的“整机断网”最安全：代理一断，整台 Mac 只剩局域网。如果你希望关掉代理后还能用浏览器上网，可以在工作台维护页“代理断开时”选“允许直连”，或运行 `sudo /Library/NetGuard/bin/netguard proxy-down direct`。切换要在代理正常时进行：它会重新开启断网保护并自检，自检失败就自动恢复原设置。
+
+开启后：
+
+- **代理正常时**：和以前一样，流量走 TUN，出口白名单、全局模式等检查照常。
+- **代理断开时**：浏览器等程序用真实 IP 直连。Claude 第一次被发现就隔离（桌面版、Claude Code 及其子进程被结束，重新打开也会被结束），真实出口不再探测。发往 Anthropic 官方网段（claude.ai、claude.com、anthropic.com、api.anthropic.com 都在其中，2026-11-17 核对）和 `ng_direct` 表中地址的连接，不走代理一律拒绝，浏览器打开 claude.ai 也不通。
+- **代理恢复后**：所有解除锁定检查（两个出口在白名单、TUN、全局模式、ClaudeGuard、规则完整）通过后自动解除隔离并通知。因其他原因（比如出口不在白名单）造成的锁定仍须手动解除。
+- **自检**：开启和 `verify` 时，把一个测试地址临时加入 `ng_direct`，确认绑定物理网卡去这个地址的连接被拒绝，然后立即移除。不会向 Anthropic 发任何请求。
+
+这个模式失去的是“整台电脑绝不用真实 IP”这一层；Claude 本身的保护基本不变。剩余风险：
+
+1. 代理断开时，其他对地区敏感的服务会看到你的真实 IP。
+2. 浏览器里开着的 claude.ai 页面，后台仍可能请求列表外的第三方服务（统计、登录、支付）。关代理前先退出 Claude、关掉 claude.ai 标签页。
+3. 状态页（status.claude.com）和 anthropic.ai 故意不拦：它们在 CloudFront/AWS 的共享地址上，拦了会误伤其他网站，而且跟账号无关。
+4. 按地域返回不同地址的 CDN：代理断开时后台会用系统 DNS 再解析一次补进拦截表，但第一次解析前有一个很短的空档。
+5. 断线演练（`drill`）只用于整机断网模式；直连模式请按 ACCEPTANCE.md 第 21–23 项验收。
+
+## 与 ClaudeExitGuard 的关系
+
+“Claude 退出监控”（ClaudeExitGuard）的识别和清理逻辑已经并入 NetGuard 后台：同一套识别引擎同时负责隔离和退出后清理，由 root 后台执行，不会被普通程序关掉，而且不会出现两个工具重复扫描。确认 NetGuard 新版工作正常（ACCEPTANCE.md 第 24 项）后，可以用 ClaudeExitGuard 自带的 `scripts/uninstall.sh` 卸载它，它的处理记录会保留。两者同时运行也不会互相误杀，只是重复做同一件事。
 
 ## 启动时安全自动更新界面（本地新增）
 
@@ -175,7 +203,7 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 | 流量是否真的经过 TUN | 严格路由运行时证据（WFP） | 路由核对：公网路由必须指向 TUN | 等价 |
 | ClaudeGuard 守护 / 保护开关 / 网络助手 | 有 | 有 | 等价 |
 | Claude 路径与钩子（claude_path，高危） | Store 版本与清单核对 | `claude` 命令钩子 + ClaudeGuard 记录的路径核对（等 ClaudeGuard 60 秒自愈后才计数） | 等价 |
-| 隔离 Claude | WFP 按程序断网 + 结束进程 | 独立线程每 0.25 秒强制结束进程 + 隔离期间 Anthropic 网段及 Claude 域名的 fake-ip 地址连 TUN 也拒绝 + ClaudeGuard 的 hosts 拦截与启动前检查 | 等价（机制不同，见限制） |
+| 隔离 Claude | WFP 按程序断网 + 结束进程 | 独立线程每 0.25 秒强制结束 Claude 及其全部子进程 + 隔离期间 Anthropic 网段及 Claude 域名的 fake-ip 地址连 TUN 也拒绝 + ClaudeGuard 的 hosts 拦截与启动前检查 | 等价（机制不同，见限制） |
 | 识别代理内核 | 按程序路径 | 按 root + 用户组，**另加**每分钟监测有无其他程序共用该身份 | 等价（多一层监测） |
 | 关机过程中产生的误锁 | 需手动解除 | 开机后检查全部通过自动解除 | **Mac 更强** |
 | 开启失败 / 中途被杀 | 自动回滚 | 自动回滚 + 后台 10 秒内回滚中途被杀的操作 | **Mac 更强** |
@@ -185,7 +213,7 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 ## 已知限制（如实说明）
 
 - **只读的状态检查不能证明不会泄露。** 绿色只表示“当前检查通过（未做断线测试）”。停代理、睡眠唤醒、切换网络要按 [ACCEPTANCE.md](ACCEPTANCE.md) 在真机上验收。
-- **隔离机制不同**：macOS 的 pf 不能按程序拦截，所以隔离靠“独立线程每 0.25 秒强制结束进程”。隔离期间，经 TUN 发往 Claude 常用域名（claude.ai、claude.com、anthropic.com 的主要子域，列表见 `netguard/claude.py`）的连接也会被拒绝，浏览器打开 claude.ai 同样不通。列表以外的子域名不在其中，要靠 ClaudeGuard 的 hosts 拦截和启动前检查兜底，所以 ClaudeGuard 默认是必需的。FlClash 内核未运行时无法查询，地址表保持上一次的内容。
+- **隔离机制不同**：macOS 的 pf 不能按程序拦截，所以隔离靠“独立线程每 0.25 秒强制结束 Claude 及其子进程”。锁定时，Claude Code 帮你启动的开发服务器、后台命令也会一起被结束。隔离期间，经 TUN 发往 Claude 常用域名（claude.ai、claude.com、anthropic.com 的主要子域，列表见 `netguard/claude.py`）的连接也会被拒绝，浏览器打开 claude.ai 同样不通。列表以外的子域名不在其中，要靠 ClaudeGuard 的 hosts 拦截和启动前检查兜底，所以 ClaudeGuard 默认是必需的。FlClash 内核未运行时无法查询，地址表保持上一次的内容。
 - **隔离期间的出口核验**：为避免隔离规则拦住 NetGuard 自己的 `claude.ai` 检查、导致永远不能解除，隔离期间通过 FlClash 已有的本地 SOCKS 通道访问同一个 HTTPS 检查地址。只接受配置中的 mixed/socks 端口，并核对监听者确实是获授权的 root FlClash 内核；不能确认时保持隔离。普通出口仍独立经过 TUN 检查，双出口白名单、TUN、全局模式、ClaudeGuard 和防火墙完整性检查仍须通过后才解除锁定；不提前清空隔离表，不修改系统代理。解除后恢复经 TUN 的常规检查。
 - **开机最早的几秒**：Windows 的规则由系统在开机最早阶段加载；Mac 由 LaunchDaemon 加载，最早一两秒内系统后台程序可能先联网。要做到和 Windows 一样早，只能修改 `/etc/pf.conf`，而这正是上次让 Mac 无法恢复的高风险做法，所以刻意不做。这时你还没登录，Claude 不可能在运行。
 - **局域网 DNS 被放行时**（系统 DNS 就是路由器），路由器能看到你查询了哪些域名，但看不到真实 IP 与 Anthropic 之间的连接。保护记录里会有“放行局域网 DNS”一条。
@@ -219,6 +247,8 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 | `require_global_mode` | `true` | FlClash 不是全局模式时记为异常 |
 | `anthropic_v4` / `anthropic_v6` | 官方网段（2026-11-11 核对） | 来源：platform.claude.com/docs/en/api/ip-addresses |
 | `require_claudeguard` | `true` | ClaudeGuard 没在运行时报中危异常 |
+| `proxy_down` | `"block"` | 代理断开时：`block` 整机断网；`direct` 允许直连且立即隔离 Claude（用 `netguard proxy-down` 切换，会自检） |
+| `claude_cleanup` | `"full"` | Claude 桌面版退出后：`full` 清理残留并结束单独运行的 Claude Code；`desktop` 只清理桌面版残留；`off` 不清理 |
 
 ## 文件位置
 
