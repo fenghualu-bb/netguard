@@ -13,6 +13,9 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# Started through the administrator dialog, root inherits the caller's directory; if that is
+# privacy-protected (~/Documents, ~/Desktop) every `python3 -c` fails to import. Work from /.
+cd /
 ROOT=/Library/NetGuard
 LABEL=com.netguard.daemon
 PLIST=/Library/LaunchDaemons/$LABEL.plist
@@ -165,6 +168,17 @@ if [ -f "$ROOT/status.json" ]; then
     "$ROOT/bin/netguard" status || true
 else
     warn "后台 40 秒内没有写出状态。查看：sudo tail -n 50 $ROOT/daemon.err.log"
+fi
+
+if grep -q '"killswitch": true' "$ROOT/state.json" 2>/dev/null; then
+    cat <<EOF
+
+安装完成。断网保护保持开启（更新不改动断网规则）。建议运行完整自检：
+  sudo $ROOT/bin/netguard verify
+断网急救（不需要网络）：双击“应用程序”里的“NetGuard 紧急恢复”，
+或运行 sudo $ROOT/bin/netguard-recover
+EOF
+    exit 0
 fi
 
 cat <<EOF
