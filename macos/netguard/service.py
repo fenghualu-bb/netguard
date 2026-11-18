@@ -1179,7 +1179,12 @@ class Service:
         row(bool(obs["tun"]) and obs.get("route") == obs["tun"], "公网流量经过 TUN", "路由接口 %s" % obs.get("route"))
         mode = (obs.get("flclash") or {}).get("mode")
         if self.cfg["require_global_mode"]:
-            row(mode == "global", "FlClash 全局模式", {"global": "全局", "rule": "规则", "direct": "直连"}.get(mode, "读不到配置"))
+            if mode in ("global", "rule", "direct"):
+                row(mode == "global", "FlClash 全局模式", {"global": "全局", "rule": "规则", "direct": "直连"}[mode])
+            else:
+                # Same rule as the watch: an unreadable FlClash config is not proof of a wrong
+                # mode (a FlClash update may move or reformat it), so it is reported, not failed.
+                out("⚠️ FlClash 代理模式：读不到配置，无法核对（不计为失败）")
         row(state["killswitch"], "断网保护已开启")
         if integ is not None:
             row(integ["complete"], "pf 规则完整", "pf=%s 锚点引用=%s 规则=%s 条" % (

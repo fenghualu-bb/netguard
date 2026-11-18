@@ -79,11 +79,10 @@ cd ~/ClaudeGuard && git checkout 61b61e1   # 2026-11-08 的版本；升级前先
 
 > ClaudeGuard 61b61e1 找不到新版官方原生 Claude Code（每个版本是 `~/.local/share/claude/versions/<版本号>` 这样的单个文件），`claudeguard doctor` 会显示 `Hands off to: NOT FOUND`，`claude` 命令无法启动。NetGuard 的 `install.sh` 会自动打一个**只加一行搜索路径**的兼容补丁：打补丁前后都校验文件哈希，文件不是这个版本就拒绝修改，并保留备份；也可以用 `--revert` 还原。重装 ClaudeGuard 后，在工作台维护页点“修复 ClaudeGuard”即可重新打上。
 
-**3. 获取本仓库**（私有仓库，需要先登录 GitHub）
+**3. 获取本仓库**（公开仓库，不需要登录）
 
 ```bash
-gh auth login        # 没装 gh 就用浏览器下载 zip
-gh repo clone fenghualu-bb/netguard ~/netguard
+git clone https://github.com/fenghualu-bb/netguard.git ~/netguard
 cd ~/netguard
 ```
 
@@ -223,14 +222,15 @@ sudo bash /Library/NetGuard/uninstall.sh --purge  # 全部删除
 - 开启 macOS **互联网共享**会替换 `com.apple/*` 锚点，断网规则因此失效；NetGuard 会把它报为高危异常并锁定，但不会去改主规则集。
 - FlClash 内核自己的 DIRECT 流量（例如国内直连规则）仍走真实 IP，这一点与 Windows 相同；不过发往 Anthropic 官方网段的流量已被拦截，规则模式也会被当作异常处理。
 
-## CI 实测结果（2026-11-11，GitHub Actions macos-15-arm64，macOS 15.8.2）
+## CI 实测结果（2026-11-17，提交 fd2ad1e，GitHub Actions macos-15-arm64，macOS 15.8.2）
 
-单元测试 75 项、真实 pf 集成测试 70 项全部通过，0 失败，0 警告。集成测试在真实内核里验证了：
+单元测试 215 项、真实 pf 集成测试 106 项全部通过，0 失败，0 警告。每次推送都会重新运行，最新结果以 Actions 页面为准。集成测试在真实内核里验证了：
 - 普通用户直连、root 后台程序直连：都被拦截；代理内核（setuid root + 用户组）的 TCP、已连接和未连接 UDP：都被放行；
 - 代理内核直连 Anthropic 网段：被拦截；隔离 Claude 时，从 TUN 去 Anthropic 网段也被拦截，代理本身不受影响；
 - 回环、局域网网关、TUN 源地址：都被放行；拦截局域网 DNS 的规则确实命中；
 - 有其他程序共用代理内核的放行身份联网时，监测能发现它；
 - 没有 FlClash 时拒绝开启；enable 中途被杀后自动回滚；模拟重启后，规则在 Python 启动前重新加载；紧急恢复、通过管理员密码框升级、卸载都正常；
+- 直连模式（`proxy_down=direct`）：普通程序直连放行；直连 Anthropic 网段和 `ng_direct` 表中的地址被拦（root 也一样）；经 TUN 访问放行，隔离时经 TUN 也被拦；自检用的临时地址加入后立即被拦、移除后恢复；表内容能被精确替换和清空；
 - 运行前后 `/etc/pf.conf`、`/etc/hosts`、pf 主规则集和 pf 启用状态完全一致。
 
 ## 配置 `/Library/NetGuard/config.json`

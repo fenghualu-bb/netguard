@@ -1238,3 +1238,25 @@ class SafetyStaticTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModeConsistencyTests(unittest.TestCase):
+    """Watch and verify judge FlClash's mode the same way."""
+
+    def test_unreadable_mode_is_reported_not_failed(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.mode = None
+        svc.tick(); clock.advance(10); svc.tick()
+        self.assertFalse(svc.read_guard()["lockdown"])
+        lines = []
+        self.assertTrue(svc.verify(out=lines.append), "\n".join(lines))
+        self.assertTrue(any("读不到配置" in l and l.startswith("⚠️") for l in lines))
+
+    def test_rule_mode_fails_both(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        pr.mode = "rule"
+        self.assertFalse(svc.verify(out=lambda *_: None))
+        svc.tick(); clock.advance(10); svc.tick()
+        self.assertIn("mode", svc.read_guard()["reason_codes"])

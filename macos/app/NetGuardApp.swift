@@ -728,7 +728,8 @@ struct OverviewView: View {
         let direct = s?.proxyDown == "direct"
         let proxyOff = o?.proxy_down_direct == true
         let proxyOK = o?.core?.privileged == true && o?.tun != nil && o?.route == o?.tun
-        let modeOK = s?.requireGlobalMode != true || o?.flclash?.mode == "global"
+        // Same rule as the daemon: only a mode read as rule/direct is wrong; unreadable is "待核实".
+        let modeOK = s?.requireGlobalMode != true || !["rule", "direct"].contains(o?.flclash?.mode ?? "")
         let exitOK = o?.egress_ok == true && o?.claude_egress_ok == true
         let rulesOK = s?.wantedKillswitch == true && s?.killswitchComplete == true
         let cgOK = cg?.fresh == true && cg?.protection_enabled != false && cg?.helper_loaded == true
@@ -794,7 +795,8 @@ struct OverviewView: View {
                         Line(label: "TUN 网卡", value: o?.tun ?? "未连接", ok: proxyOff ? nil : o?.tun != nil)
                         Line(label: "流量路由", value: o?.route == nil ? "未知" : (o?.route == o?.tun ? "经过 TUN（\(o?.route ?? "")）" : "未经过 TUN（\(o?.route ?? "")）"),
                              ok: proxyOff ? nil : o?.tun != nil && o?.route == o?.tun)
-                        Line(label: "代理模式", value: modeName(o?.flclash?.mode), ok: s?.requireGlobalMode == true ? o?.flclash?.mode == "global" : nil)
+                        Line(label: "代理模式", value: modeName(o?.flclash?.mode),
+                             ok: s?.requireGlobalMode == true && o?.flclash?.mode != nil ? o?.flclash?.mode == "global" : nil)
                         Line(label: "配置文件", value: "\(o?.flclash?.path ?? "未找到")（\(fmtTime(o?.flclash?.mtime))）")
                     }
 

@@ -20,7 +20,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Python unit tests with /usr/bin/python3
         run: |
           /usr/bin/python3 --version
@@ -80,7 +80,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install, probe, rollback, boot re-apply, recover, uninstall
         run: sudo -E bash macos/ci/integration.sh
       - name: NetGuard logs on failure
