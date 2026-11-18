@@ -305,6 +305,8 @@ class Service:
                               isolate=bool(state.get("claude_block")), direct=bool(state.get("direct")),
                               direct_block=self.direct_block(state))
         self.pf.load(text)
+        if state.get("direct"):
+            self.pf.set_direct_table(self.direct_block(state))  # a reload does not reset the table
         util.write_text(paths.ANCHOR_FILE, text, mode=0o644)
         token = self.pf.acquire_token(self.read_token())
         self.write_token(token)

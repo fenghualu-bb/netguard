@@ -58,7 +58,8 @@ class EnableTests(unittest.TestCase):
         self.assertFalse(st["dns_block"])  # the router is the only resolver with the proxy off
         self.assertEqual(sorted(st["direct_block"]), AUX)  # 160.79.104.10 is already covered by the ranges
         self.assertEqual(pf.direct, AUX)  # canary removed again
-        self.assertEqual(pf.direct_ops[:2], [["add", "1.0.0.1"], ["delete", "1.0.0.1"]][:len(pf.direct_ops[:2])])
+        ops = [op[0] for op in pf.direct_ops if op[0] != "show"]
+        self.assertEqual(ops[:3], ["replace", "add", "delete"])  # exact table, then canary in and out
         self.assertIn(["add", "1.0.0.1"], pf.direct_ops)
         self.assertIn(["delete", "1.0.0.1"], pf.direct_ops)
         self.assertTrue(svc.integrity(st)["complete"])
@@ -190,6 +191,14 @@ class HostTableTests(unittest.TestCase):
         svc.tick()
         self.assertEqual(pr.resolve_public_calls[-1], "system")
         self.assertIn("34.120.108.99", pf.direct)
+
+    def test_table_is_emptied_although_a_reload_keeps_contents(self):
+        svc, pf, pr, clock, kills, notes = enabled(self)
+        st = svc.read_state()
+        st["direct_block"] = {}
+        svc.refresh_rules(st)  # declaration without addresses: real pf keeps the old contents
+        self.assertEqual(pf.direct, [])
+        self.assertTrue(svc.integrity(svc.read_state())["complete"])
 
     def test_old_addresses_expire(self):
         svc, pf, pr, clock, kills, notes = enabled(self)

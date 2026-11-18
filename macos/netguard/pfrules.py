@@ -306,6 +306,17 @@ class PF:
         """Temporarily add one address (the self-test canary); rules and fingerprint unchanged."""
         self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "add", address)
 
+    def set_direct_table(self, addresses):
+        """Make ng_direct hold exactly `addresses`.
+
+        Reloading the anchor does not reset an existing persist table whose declaration lists
+        no addresses (seen on macOS 15 in CI), so contents are always set explicitly.
+        """
+        if addresses:
+            self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "replace", *addresses)
+        else:
+            self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "flush", check=False)
+
     def drop_direct_table(self):
         self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "kill", check=False)
 

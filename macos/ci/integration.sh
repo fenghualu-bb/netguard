@@ -209,9 +209,20 @@ py "
 from netguard import pfrules
 pf = pfrules.PF(); pf.direct_table_delete('1.1.1.1')"
 probe_case "直连模式：自检地址移除后恢复直连" OK ng_direct runner 1.1.1.1 443 5000
+echo "  -- 重新加载不会清空已存在的表，所以内容必须显式设置"
+py "
+from netguard import pfrules
+pf = pfrules.PF(); pf.drop_claude_table(); pf.set_direct_table(['1.0.0.3', '1.0.0.4'])"
+check "拦截表内容被精确替换" bash -c "[ \"\$(/sbin/pfctl -a '$ANCHOR' -t ng_direct -T show | tr -d ' ' | sort | tr '\n' ,)\" = '1.0.0.3,1.0.0.4,' ]"
+py "
+from netguard import pfrules
+pfrules.PF().set_direct_table([])"
+check "拦截表可被清空" bash -c "[ -z \"\$(/sbin/pfctl -a '$ANCHOR' -t ng_direct -T show)\" ]"
 py "
 from netguard import config, pfrules
-pfrules.PF().load(pfrules.render(config.validate({}), 0, $GID, isolate=True, direct=True, direct_block=['1.0.0.1']))"
+pf = pfrules.PF()
+pf.load(pfrules.render(config.validate({}), 0, $GID, isolate=True, direct=True, direct_block=['1.0.0.1']))
+pf.set_direct_table(['1.0.0.1'])"
 if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
     probe_case "直连模式隔离时：经 TUN 去拦截表地址也被拦" FAIL ng_direct_block runner -b 198.18.0.1 1.0.0.1 443 1500
     /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null

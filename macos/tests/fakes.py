@@ -65,7 +65,10 @@ class FakePfctl:
                 self.table = []  # a reload empties the declared table
             import re as _re
             m = _re.search(r"table <ng_direct> persist(?: \{ ([^}]*) \})?", input)
-            self.direct = sorted(x.strip() for x in m.group(1).split(",")) if m and m.group(1) else ([] if m else None)
+            if m and m.group(1):
+                self.direct = sorted(x.strip() for x in m.group(1).split(","))
+            elif m and self.direct is None:
+                self.direct = []  # like real pf: an existing table keeps its contents
             return ok()
         if a[:4] == ["-a", paths.ANCHOR, "-t", "ng_direct"]:
             op = a[5]
@@ -78,6 +81,10 @@ class FakePfctl:
                 self.direct = [x for x in (self.direct or []) if x not in a[6:]]
             elif op == "kill":
                 self.direct = None
+            elif op == "replace":
+                self.direct = sorted(set(a[6:]))
+            elif op == "flush":
+                self.direct = []
             return ok()
         if a[:4] == ["-a", paths.ANCHOR, "-t", "ng_claude"]:
             op = a[5]
