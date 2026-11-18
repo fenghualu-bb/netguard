@@ -328,7 +328,10 @@ final class Model: ObservableObject {
         if let e = decodeError { return e }
         guard let s = status else { return "NetGuard 后台未运行（没有状态文件）" }
         if age >= 60 { return "状态已 \(Int(age)) 秒未更新：后台可能已停止" }
-        if proxyOffIsolation { return "代理已断开：浏览器等可直连，Claude 已隔离（代理恢复且检查通过后自动解除）" }
+        if proxyOffIsolation { return "代理已断开：Claude 已隔离，其他程序可直连" }
+        if s.guardInfo?.lockdown == true, let reasons = s.guardInfo?.reasons, let first = reasons.first {
+            return "已锁定 Claude：" + first + (reasons.count > 1 ? "（等 \(reasons.count) 项）" : "")
+        }
         if s.guardInfo?.lockdown == true { return "已锁定 Claude：" + (s.guardInfo?.reasons ?? []).joined(separator: "；") }
         if s.wantedKillswitch == true && s.killswitchComplete != true { return "断网保护不完整！" }
         if s.wantedKillswitch != true { return "断网保护未开启" }
@@ -485,40 +488,235 @@ func confirm(_ title: String, _ text: String) -> Bool {
 
 // MARK: - Views
 
+/// One meaning per color everywhere: green = fine, orange = needs a look, red = act, gray = not applicable.
+enum Tone {
+    case ok, warn, bad, neutral
+
+    var color: Color {
+        switch self {
+        case .ok: return .green
+        case .warn: return .orange
+        case .bad: return .red
+        case .neutral: return .secondary
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .ok: return "checkmark.circle.fill"
+        case .warn: return "exclamationmark.circle.fill"
+        case .bad: return "xmark.circle.fill"
+        case .neutral: return "minus.circle"
+        }
+    }
+}
+
+func tone(_ ok: Bool?) -> Tone { ok == nil ? .neutral : (ok! ? .ok : .bad) }
+
+/// Numbers without thousands separators (a pid is not "15,926").
+func plain(_ v: Double?) -> String { String(Int(v ?? 0)) }
+
+/// ClaudeGuard's verdict in words: "blocked" is ClaudeGuard doing its job, not a failure.
+func cgStateName(_ state: String?) -> String {
+    switch state {
+    case "allowed": return "放行 Claude"
+    case "blocked": return "已拦截 Claude"
+    case nil: return "?"
+    default: return state!
+    }
+}
+
+let panelFill = Color(nsColor: .controlBackgroundColor)
+let panelStroke = Color(nsColor: .separatorColor).opacity(0.6)
+
+struct Panel<Content: View>: View {
+    var padding: CGFloat = 14
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) { content }
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(panelFill))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(panelStroke, lineWidth: 0.5))
+    }
+}
+
+/// Kept for older call sites (the real-IP wizard).
 struct Card<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        Panel {
             Text(title).font(.headline)
             content
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
     }
 }
 
+/// A label / value row; labels share one column width so values line up.
 struct Line: View {
     let label: String
     let value: String
     var ok: Bool? = nil
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundColor(.secondary).frame(width: 96, alignment: .leading)
-            if let ok = ok {
-                Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundColor(ok ? .green : .red)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label).foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if let ok = ok {
+                    Image(systemName: tone(ok).symbol).foregroundStyle(tone(ok).color).font(.callout)
+                }
+                Text(value).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
-            Text(value).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
+        .font(.callout)
+    }
+}
+
+// MARK: Overview
+
+struct StatusBanner: View {
+    @ObservedObject var model: Model
+    var body: some View {
+        let s = model.status
+        let g = s?.guardInfo
+        let o = s?.observations
+        let color = model.overall.swiftColor
+        let proxyOff = o?.proxy_down_direct == true
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: model.overall.symbol)
+                .font(.system(size: 36, weight: .medium))
+                .foregroundStyle(color)
+                .frame(width: 44)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.headline).font(.title3.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                Text("上次检查 \(fmtTime(g?.last_check)) · 用时 \(String(format: "%.1f", g?.duration ?? 0)) 秒 · NetGuard \(s?.version ?? "?")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(proxyOff ? "代理" : "当前出口").font(.caption).foregroundStyle(.secondary)
+                Text(proxyOff ? "已断开" : (o?.egress ?? "未取得"))
+                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(proxyOff ? Color.orange : (o?.egress_ok == true ? Color.green : Color.red))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(color.opacity(0.35), lineWidth: 1))
+    }
+}
+
+struct ChainTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    let detail: String
+    let tone: Tone
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).foregroundStyle(.secondary)
+                Text(title).font(.subheadline).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Image(systemName: tone.symbol).foregroundStyle(tone.color)
+            }
+            Text(value).font(.headline).lineLimit(1).minimumScaleFactor(0.75)
+            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(tone == .ok || tone == .neutral ? panelStroke : tone.color.opacity(0.6),
+                          lineWidth: tone == .ok || tone == .neutral ? 0.5 : 1.2))
+    }
+}
+
+/// A collapsible section: a one-line summary when closed, aligned rows when open.
+struct DetailSection<Content: View>: View {
+    let icon: String
+    let title: String
+    let summary: String
+    var summaryTone: Tone = .neutral
+    @Binding var expanded: Bool
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Image(systemName: icon).foregroundStyle(.secondary).frame(width: 18)
+                    Text(title).font(.headline)
+                    Spacer(minLength: 12)
+                    if summaryTone != .neutral {
+                        Image(systemName: summaryTone.symbol).foregroundStyle(summaryTone.color).font(.callout)
+                    }
+                    Text(summary).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14).padding(.vertical, 11)
+            if expanded {
+                Divider().padding(.horizontal, 14)
+                VStack(alignment: .leading, spacing: 7) { content }
+                    .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 14)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 10).fill(panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(panelStroke, lineWidth: 0.5))
+    }
+}
+
+let roleOrder: [String: Int] = ["main": 0, "helper": 1, "updater": 2, "cli": 3, "descendant": 4]
+
+struct ProcessTable: View {
+    let procs: [NGClaudeProc]
+    var body: some View {
+        let rows = procs.sorted {
+            let a = roleOrder[$0.role ?? ""] ?? 9, b = roleOrder[$1.role ?? ""] ?? 9
+            return a != b ? a < b : ($0.pid ?? 0) < ($1.pid ?? 0)
+        }
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
+            GridRow {
+                Text("PID").gridColumnAlignment(.trailing)
+                Text("类型")
+                Text("程序")
+                Text("路径")
+            }
+            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Divider().gridCellUnsizedAxes(.horizontal)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, p in
+                GridRow(alignment: .firstTextBaseline) {
+                    Text(plain(p.pid)).font(.system(.caption, design: .monospaced))
+                    Text(roleNames[p.role ?? ""] ?? (p.role ?? ""))
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    Text(p.name ?? "?").font(.caption).lineLimit(1)
+                    Text(p.path ?? "").font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle).help(p.path ?? "")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .textSelection(.enabled)
     }
 }
 
 struct OverviewView: View {
     @ObservedObject var model: Model
     @Binding var showWizard: Bool
+    @AppStorage("ov.exit") private var openExit = false
+    @AppStorage("ov.rules") private var openRules = false
+    @AppStorage("ov.cg") private var openCG = false
+    @AppStorage("ov.claude") private var openClaude = false
 
     var body: some View {
         let s = model.status
@@ -526,121 +724,137 @@ struct OverviewView: View {
         let o = s?.observations
         let i = s?.integrity
         let cg = o?.claudeguard
+        let c = s?.claude
+        let direct = s?.proxyDown == "direct"
+        let proxyOff = o?.proxy_down_direct == true
+        let proxyOK = o?.core?.privileged == true && o?.tun != nil && o?.route == o?.tun
+        let modeOK = s?.requireGlobalMode != true || o?.flclash?.mode == "global"
+        let exitOK = o?.egress_ok == true && o?.claude_egress_ok == true
+        let rulesOK = s?.wantedKillswitch == true && s?.killswitchComplete == true
+        let cgOK = cg?.fresh == true && cg?.protection_enabled != false && cg?.helper_loaded == true
+            && cg?.cli_hooked != false && cg?.app_path_ok != false && cg?.cli_path_ok != false
+        let isolated = s?.claudeBlock == true
+        let attention = attentionItems(s)
+
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: model.overall.symbol).font(.system(size: 34))
-                            .foregroundColor(model.overall.swiftColor)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(model.headline).font(.title3).bold().fixedSize(horizontal: false, vertical: true)
-                            Text("NetGuard \(s?.version ?? "?") · 上次检查 \(fmtTime(g?.last_check)) · 耗时 \(String(format: "%.1f", g?.duration ?? 0)) 秒")
-                                .foregroundColor(.secondary).font(.caption)
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing) {
-                            Text("当前出口").font(.caption).foregroundColor(.secondary)
-                            Text(o?.proxy_down_direct == true ? "代理已断开" : (o?.egress ?? "未取得"))
-                                .font(.system(.title2, design: .monospaced)).bold()
-                                .foregroundColor(o?.proxy_down_direct == true ? .orange : (o?.egress_ok == true ? .green : .red))
+                VStack(alignment: .leading, spacing: 14) {
+                    StatusBanner(model: model)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                        ChainTile(icon: "network", title: "代理",
+                                  value: proxyOff ? "已断开" : (proxyOK ? "TUN \(o?.tun ?? "")" : "未就绪"),
+                                  detail: proxyOff ? "直连模式：其他程序用真实 IP" : "FlClash \(modeName(o?.flclash?.mode))模式",
+                                  tone: proxyOff ? .warn : (proxyOK && modeOK ? .ok : .bad))
+                        ChainTile(icon: "globe", title: "出口",
+                                  value: proxyOff ? "不探测" : (o?.egress ?? "未取得"),
+                                  detail: proxyOff ? "代理断开时不探测真实出口" : (exitOK ? "两个出口都在白名单" : "出口不在白名单或未取得"),
+                                  tone: proxyOff ? .neutral : (exitOK ? .ok : .bad))
+                        ChainTile(icon: "lock.shield", title: "断网保护",
+                                  value: s?.wantedKillswitch == true ? (rulesOK ? "已开启" : "不完整") : "未开启",
+                                  detail: direct ? "代理断开时允许直连" : "代理断开时整机断网",
+                                  tone: s?.wantedKillswitch == true ? (rulesOK ? .ok : .bad) : .warn)
+                        ChainTile(icon: "checkmark.seal", title: "ClaudeGuard",
+                                  value: cg?.fresh == true ? cgStateName(cg?.state) : "未运行",
+                                  detail: cgOK ? "保护、助手、钩子都正常" : "有一项未就绪，展开下方查看",
+                                  tone: s?.requireClaudeguard == false ? .neutral : (cgOK ? .ok : .bad))
+                        ChainTile(icon: "sparkle", title: "Claude",
+                                  value: isolated ? "已隔离" : (c?.main_running == true ? "运行中" : "未运行"),
+                                  detail: isolated ? "打开会被立即结束" : "相关进程 \(plain(c?.count)) 个",
+                                  tone: isolated ? .warn : .ok)
+                    }
+
+                    if !attention.isEmpty {
+                        Panel {
+                            Label("需要注意", systemImage: "exclamationmark.triangle.fill")
+                                .font(.headline).foregroundStyle(model.overall == .bad ? Color.red : Color.orange)
+                            ForEach(Array(attention.enumerated()), id: \.offset) { _, item in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("•").foregroundStyle(.secondary)
+                                    Text(item).font(.callout).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                         }
                     }
-                    HStack(alignment: .top, spacing: 12) {
-                        Card(title: "出口 IP") {
-                            if o?.proxy_down_direct == true {
-                                Line(label: "普通流量", value: "代理已断开，其他程序直连（不探测真实出口）")
-                                Line(label: "claude.ai", value: "Claude 已隔离，Anthropic 网段只能经代理访问")
-                            } else {
-                                Line(label: "普通流量", value: o?.egress ?? "未取得", ok: o?.egress_ok)
-                                Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
-                            }
-                            Line(label: "白名单", value: (s?.whitelist ?? []).isEmpty ? "空" : (s?.whitelist ?? []).joined(separator: ", "))
+
+                    DetailSection(icon: "arrow.left.arrow.right", title: "出口与代理",
+                                  summary: proxyOff ? "代理已断开" : "\(o?.egress ?? "未取得") · \(modeName(o?.flclash?.mode))",
+                                  summaryTone: proxyOff ? .warn : (exitOK && proxyOK && modeOK ? .ok : .bad), expanded: $openExit) {
+                        if proxyOff {
+                            Line(label: "普通流量", value: "代理已断开，其他程序直连（不探测真实出口）")
+                            Line(label: "claude.ai", value: "Claude 已隔离，Anthropic 网段只能经代理访问")
+                        } else {
+                            Line(label: "普通流量", value: o?.egress ?? "未取得", ok: o?.egress_ok)
+                            Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
                         }
-                        Card(title: "自动防护") {
-                            Line(label: "状态", value: g?.enabled == true ? "每 \(Int(s?.interval ?? 10)) 秒检查，连续 2 次异常即隔离 Claude" : "关闭")
-                            Line(label: "锁定", value: g?.lockdown == true ? "是，\(fmtTime(g?.since)) 起" : "否", ok: g?.lockdown != true)
-                            Line(label: "异常 / 原因", value: (g?.last_findings ?? []).isEmpty ? "无" : (g?.last_findings ?? []).joined(separator: "；"))
-                            if let gu = g?.grace_until, gu > Date().timeIntervalSince1970 {
-                                Line(label: "宽限期", value: "至 \(fmtTime(gu))（开机/登录/唤醒后中危不锁定）")
-                            }
-                            Line(label: "累计触发", value: "\(Int(g?.triggers ?? 0)) 次")
-                        }
+                        Line(label: "白名单", value: (s?.whitelist ?? []).isEmpty ? "空" : (s?.whitelist ?? []).joined(separator: "、"))
+                        Divider()
+                        Line(label: "FlClash", value: "界面\(o?.flclash_ui == true ? "运行中" : "未运行") · 内核\(o?.core?.running == true ? (o?.core?.privileged == true ? "已授权（root）" : "未授权") : "未运行")",
+                             ok: o?.core?.privileged == true)
+                        Line(label: "TUN 网卡", value: o?.tun ?? "未连接", ok: proxyOff ? nil : o?.tun != nil)
+                        Line(label: "流量路由", value: o?.route == nil ? "未知" : (o?.route == o?.tun ? "经过 TUN（\(o?.route ?? "")）" : "未经过 TUN（\(o?.route ?? "")）"),
+                             ok: proxyOff ? nil : o?.tun != nil && o?.route == o?.tun)
+                        Line(label: "代理模式", value: modeName(o?.flclash?.mode), ok: s?.requireGlobalMode == true ? o?.flclash?.mode == "global" : nil)
+                        Line(label: "配置文件", value: "\(o?.flclash?.path ?? "未找到")（\(fmtTime(o?.flclash?.mtime))）")
                     }
-                    HStack(alignment: .top, spacing: 12) {
-                        Card(title: "ClaudeGuard") {
-                            if s?.requireClaudeguard == false {
-                                Text("未要求（require_claudeguard=false）").foregroundColor(.secondary)
-                            }
-                            Line(label: "守护进程", value: cg?.fresh == true ? "运行中 / 保护\(cg?.protection_enabled == false ? "关闭" : "开启")" : "未运行或状态过期",
-                                 ok: cg?.fresh == true && cg?.protection_enabled != false)
-                            Line(label: "出口判定", value: "\(cg?.state ?? "?")  \(cg?.ip ?? "")", ok: cg?.state == "allowed")
-                            Line(label: "网络助手", value: cg?.helper_loaded == true ? "运行中" : "未运行", ok: cg?.helper_loaded == true)
-                            Line(label: "Claude 钩子", value: cg?.cli_hooked == nil ? "未安装 Claude Code（不适用）" : (cg?.cli_hooked == true ? "claude 命令经过 ClaudeGuard" : "claude 命令未经过 ClaudeGuard"),
-                                 ok: cg?.cli_hooked == nil ? nil : cg?.cli_hooked == true)
-                            Line(label: "桌面版", value: cg?.app_path_ok == nil ? "未安装（不适用）" : ((cg?.app_installed ?? []).joined(separator: "、") + (cg?.app_path_ok == true ? "，ClaudeGuard 已跟上" : "，ClaudeGuard 记录过期")),
-                                 ok: cg?.app_path_ok)
-                            Line(label: "Claude Code", value: cg?.cli_path_ok == nil ? "未安装（不适用）" : (cg?.cli_path_ok == true ? "ClaudeGuard 已跟上" : "ClaudeGuard 记录过期（维护页“修复 ClaudeGuard”）"),
-                                 ok: cg?.cli_path_ok)
-                            Line(label: "兼容补丁", value: cg?.cg_patch == "patched" ? "已应用（识别新版原生 Claude Code）" : (cg?.cg_patch == "original" ? "未应用" : (cg?.cg_patch == nil ? "—" : "未知版本")),
-                                 ok: cg?.cg_patch == nil ? nil : cg?.cg_patch == "patched")
+
+                    DetailSection(icon: "lock.shield", title: "断网保护",
+                                  summary: s?.wantedKillswitch == true ? "\(plain(i?.rule_count)) 条规则 · \(direct ? "代理断开时允许直连" : "代理断开时整机断网")" : "未开启",
+                                  summaryTone: s?.wantedKillswitch == true ? (rulesOK ? .ok : .bad) : .warn, expanded: $openRules) {
+                        Line(label: "规则", value: s?.wantedKillswitch == true ? (rulesOK ? "已开启，\(plain(i?.rule_count)) 条规则完整" : "已开启但不完整") : "未开启",
+                             ok: s?.wantedKillswitch == true ? rulesOK : nil)
+                        Line(label: "pf", value: "\(i?.pf_enabled == true ? "已启用" : "未启用") · 锚点引用\(i?.main_anchor_ref == true ? "存在" : "缺失") · token \(i?.token_live == true ? "有效" : "无")")
+                        Line(label: "代理断开时", value: direct ? "允许直连：浏览器等用真实 IP，Claude 立即隔离，恢复后自动解除" : "整机断网：只剩局域网")
+                        if direct {
+                            let check = s?.directCheck
+                            Line(label: "拦截表", value: "Claude 的其他地址 \(plain(s?.directBlock)) 个（只能经代理访问）")
+                            Line(label: "主站网段", value: check == nil ? "尚未核对" : ((check?.moved ?? []).isEmpty ? "在 Anthropic 网段内（\(fmtTime(check?.at)) 核对）" : "不在官方网段：" + (check?.moved ?? []).joined(separator: "、")),
+                                 ok: check == nil ? nil : (check?.moved ?? []).isEmpty)
+                        } else {
+                            Line(label: "局域网 DNS", value: s?.dnsBlock == true ? "拦截" : "放行（系统 DNS 是路由器时自动放行）")
                         }
-                        Card(title: "FlClash") {
-                            Line(label: "进程", value: "界面 \(o?.flclash_ui == true ? "✓" : "✗") / 内核 \(o?.core?.running == true ? "✓" : "✗")",
-                                 ok: o?.flclash_ui == true && o?.core?.running == true)
-                            Line(label: "内核授权", value: o?.core?.privileged == true ? "root（TUN 已授权）" : "未授权", ok: o?.core?.privileged == true)
-                            Line(label: "TUN 网卡", value: o?.tun ?? "未连接", ok: o?.tun != nil)
-                            Line(label: "流量路由", value: o?.route == nil ? "?" : (o?.route == o?.tun ? "经过 TUN（\(o?.route ?? "")）" : "未经过 TUN（\(o?.route ?? "")）"),
-                                 ok: o?.tun != nil && o?.route == o?.tun)
-                            Line(label: "代理模式", value: modeName(o?.flclash?.mode),
-                                 ok: s?.requireGlobalMode == true ? o?.flclash?.mode == "global" : nil)
-                            Line(label: "严格路由", value: "由 NetGuard pf 规则承担（macOS 无需 strict-route）")
-                        }
+                        Line(label: "Claude 隔离", value: isolated ? "已隔离：打开会被立即结束，Anthropic 网段连 TUN 也拦" : "未隔离")
+                        Line(label: "真实 IP 模式", value: s?.realip == true ? "已启用" : "未启用")
+                        Line(label: "累计触发", value: "\(plain(g?.triggers)) 次")
+                        Line(label: "最近操作", value: "\(fmtTime(s?.lastEvent?.ts)) \(eventNames[s?.lastEvent?.type ?? ""] ?? (s?.lastEvent?.type ?? "—"))：\(s?.lastEvent?.summary ?? "")")
                     }
-                    Card(title: "Claude 进程") {
-                        let c = s?.claude
-                        let procs = c?.processes ?? []
-                        Line(label: "桌面版", value: c?.main_running == true ? "运行中" : "未运行")
-                        Line(label: "相关进程", value: procs.isEmpty ? "无" : "\(Int(c?.count ?? 0)) 个：" + summarizeNames(procs))
+
+                    DetailSection(icon: "checkmark.seal", title: "ClaudeGuard",
+                                  summary: cg?.fresh == true ? "运行中 · \(cgStateName(cg?.state))" : "未运行或状态过期",
+                                  summaryTone: s?.requireClaudeguard == false ? .neutral : (cgOK ? .ok : .bad), expanded: $openCG) {
+                        Line(label: "守护进程", value: cg?.fresh == true ? "运行中，保护\(cg?.protection_enabled == false ? "关闭" : "开启")" : "未运行或状态过期",
+                             ok: cg?.fresh == true && cg?.protection_enabled != false)
+                        Line(label: "出口判定", value: "\(cgStateName(cg?.state))（看到的出口 \(cg?.ip ?? "?")）", ok: cg?.state == "allowed")
+                        Line(label: "网络助手", value: cg?.helper_loaded == true ? "运行中" : "未运行", ok: cg?.helper_loaded == true)
+                        Line(label: "claude 命令", value: cg?.cli_hooked == nil ? "未安装 Claude Code" : (cg?.cli_hooked == true ? "经过 ClaudeGuard" : "未经过 ClaudeGuard"),
+                             ok: cg?.cli_hooked)
+                        Line(label: "桌面版", value: cg?.app_path_ok == nil ? "未安装" : (cg?.app_path_ok == true ? "ClaudeGuard 已跟上" : "ClaudeGuard 记录过期"), ok: cg?.app_path_ok)
+                        Line(label: "Claude Code", value: cg?.cli_path_ok == nil ? "未安装" : (cg?.cli_path_ok == true ? "ClaudeGuard 已跟上" : "记录过期（维护页“修复 ClaudeGuard”）"), ok: cg?.cli_path_ok)
+                        Line(label: "兼容补丁", value: cg?.cg_patch == "patched" ? "已应用" : (cg?.cg_patch == "original" ? "未应用" : (cg?.cg_patch == nil ? "—" : "未知版本")),
+                             ok: cg?.cg_patch == nil ? nil : cg?.cg_patch == "patched")
+                    }
+
+                    DetailSection(icon: "sparkle", title: "Claude 进程",
+                                  summary: "\(c?.main_running == true ? "桌面版运行中" : "桌面版未运行") · \(plain(c?.count)) 个相关进程",
+                                  expanded: $openClaude) {
                         Line(label: "退出后清理", value: cleanupNames[c?.policy ?? ""] ?? "—")
                         if let last = c?.last_cleanup {
-                            Line(label: "上次清理", value: "\(fmtTime(last.at))：结束 \((last.cleaned ?? []).count) 个"
-                                 + ((last.failed ?? []).isEmpty ? "" : "，\((last.failed ?? []).count) 个未能结束"),
+                            Line(label: "上次清理", value: "\(fmtTime(last.at))，结束 \((last.cleaned ?? []).count) 个" + ((last.failed ?? []).isEmpty ? "" : "，\((last.failed ?? []).count) 个未能结束"),
                                  ok: (last.failed ?? []).isEmpty)
                         }
-                        if !procs.isEmpty {
-                            DisclosureGroup("进程明细") {
-                                ForEach(Array(procs.enumerated()), id: \.offset) { _, p in
-                                    HStack(alignment: .firstTextBaseline) {
-                                        Text("\(Int(p.pid ?? 0))").font(.system(.caption, design: .monospaced)).frame(width: 56, alignment: .leading)
-                                        Text(roleNames[p.role ?? ""] ?? (p.role ?? "")).font(.caption).frame(width: 70, alignment: .leading)
-                                        Text(p.path ?? "").font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
-                                            .help(p.path ?? "")
-                                    }
-                                }
-                            }.font(.caption)
+                        if let procs = c?.processes, !procs.isEmpty {
+                            Divider().padding(.vertical, 2)
+                            ProcessTable(procs: procs)
                         }
                     }
-                    Card(title: "断网保护（NetGuard）") {
-                        Line(label: "代理断开时", value: s?.proxyDown == "direct" ? "允许直连（Claude 立即隔离）" : "整机断网")
-                        Line(label: "规则", value: s?.wantedKillswitch == true ? (s?.killswitchComplete == true ? "已开启 / \(Int(i?.rule_count ?? 0)) 条规则完整" : "已开启但不完整") : "未开启",
-                             ok: s?.wantedKillswitch == true ? s?.killswitchComplete == true : nil)
-                        Line(label: "pf / token", value: "\(i?.pf_enabled == true ? "已启用" : "未启用") / 锚点引用\(i?.main_anchor_ref == true ? "存在" : "缺失") / token \(i?.token_live == true ? "有效" : "无")")
-                        Line(label: "局域网 DNS", value: s?.dnsBlock == true ? "拦截（与 Windows 相同）" : "放行（系统 DNS 是路由器时自动放行）")
-                        Line(label: "Claude 隔离", value: s?.claudeBlock == true ? "已隔离（打开会被立即结束，Anthropic 网段连 TUN 也拦）" : "未隔离")
-                        Line(label: "真实 IP 模式", value: s?.realip == true ? "已启用" : "未启用")
-                        if let others = o?.exempt_others, !others.isEmpty {
-                            Line(label: "注意", value: others.joined(separator: "、") + " 与代理内核共用放行身份联网", ok: false)
-                        }
-                        Line(label: "最近操作", value: "\(fmtTime(s?.lastEvent?.ts)) [\(eventNames[s?.lastEvent?.type ?? ""] ?? (s?.lastEvent?.type ?? "—"))] \(s?.lastEvent?.summary ?? "")")
-                        Line(label: "FlClash 配置", value: "\(o?.flclash?.path ?? "未找到")（\(fmtTime(o?.flclash?.mtime))）")
-                    }
-                    Text("界面绿色只表示当前检查通过；真实停代理、睡眠唤醒、切换网络需另行验收。")
-                        .font(.caption).foregroundColor(.secondary)
+
+                    Text("绿色只表示当前检查通过；停代理、睡眠唤醒、切换网络需按验收清单在真机上验证。")
+                        .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 2)
                 }
                 .padding(16)
             }
             Divider()
-            HStack {
+            HStack(spacing: 8) {
                 if s?.wantedKillswitch == true {
                     Button("关闭断网保护") {
                         if confirm("关闭断网保护？", "关闭后代理一旦断开，流量可能经真实 IP 发出；同时会解除 Claude 的锁定与隔离（不做检查）。") {
@@ -649,21 +863,51 @@ struct OverviewView: View {
                     }
                 } else {
                     Button("开启断网保护") {
-                        if confirm("开启断网保护？", "会先预检（FlClash TUN、内核授权、出口白名单），加载规则后自检 DNS、代理出口和直连拦截；任一失败会自动恢复，不会让你断网。\n\n建议先关闭浏览器和 Claude。") {
+                        if confirm("开启断网保护？", "会先预检（FlClash TUN、内核授权、出口白名单），加载规则后自检；任一失败会自动恢复，不会让你断网。建议先关闭浏览器和 Claude。") {
                             model.admin(["enable"])
                         }
                     }
                 }
-                Button(s?.realip == true ? "退出真实 IP 模式…" : "进入真实 IP 模式…") { showWizard = true }
-                Button("解除锁定") { model.releaseWithoutPassword() }.disabled(g?.lockdown != true)
+                Button(s?.realip == true ? "退出真实 IP 模式…" : "真实 IP 模式…") { showWizard = true }
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
+                if g?.lockdown == true {
+                    Button("解除锁定") { model.releaseWithoutPassword() }.buttonStyle(.borderedProminent)
+                }
                 Button("刷新状态") { model.refreshStatus() }.keyboardShortcut("r")
             }
-            .padding(12)
+            .padding(.horizontal, 16).padding(.vertical, 10)
         }
     }
+
+    /// Only what needs the user's eyes; empty when everything is fine.
+    func attentionItems(_ s: NGStatus?) -> [String] {
+        guard let s = s else { return [] }
+        var out: [String] = []
+        if model.proxyOffIsolation {
+            out.append("代理已断开：Claude 被隔离，浏览器等其他程序正在用真实 IP 上网。重新打开 FlClash 后，检查通过会自动解除。")
+        } else if s.guardInfo?.lockdown == true {
+            out += (s.guardInfo?.reasons ?? []).map { "锁定原因：" + $0 }
+            out.append("问题解决后点右下角“解除锁定”；解除前会重新做全部检查。")
+        } else {
+            out += s.guardInfo?.last_findings ?? []
+        }
+        if s.wantedKillswitch == true && s.killswitchComplete != true { out.append("断网保护规则不完整。") }
+        if let others = s.observations?.exempt_others, !others.isEmpty {
+            out.append(others.joined(separator: "、") + " 与代理内核共用放行身份联网。")
+        }
+        if let moved = s.directCheck?.moved, !moved.isEmpty {
+            out.append("Claude 主站解析到 Anthropic 网段以外：" + moved.joined(separator: "、"))
+        }
+        if let failed = s.claude?.last_cleanup?.failed, !failed.isEmpty {
+            out.append("上次清理有 \(failed.count) 个 Claude 残留进程未能结束：" + summarizeNames(failed))
+        }
+        var seen = Set<String>()
+        return out.filter { seen.insert($0).inserted }
+    }
 }
+
+// MARK: Real IP wizard
 
 struct RealIpWizard: View {
     @ObservedObject var model: Model
@@ -672,32 +916,30 @@ struct RealIpWizard: View {
         let s = model.status
         let o = s?.observations
         let inMode = s?.claudeBlock == true
-        VStack(alignment: .leading, spacing: 12) {
-            Text("真实 IP 模式").font(.title2).bold()
-            Text("需要暂时不用代理时使用：先隔离 Claude，再改代理；出口回到白名单后再退出。锁定期间请用“解除锁定”，不要用这里。")
-                .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            GroupBox("① 隔离 Claude") {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("真实 IP 模式").font(.title2.weight(.semibold))
+            Text("需要暂时换到白名单以外的节点时使用：先隔离 Claude，再改代理；出口回到白名单后再退出。锁定期间请用“解除锁定”，不要用这里。")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            WizardStep(number: 1, title: "隔离 Claude", done: inMode) {
                 HStack {
-                    Text(inMode ? "Claude 已隔离：打开会在约 0.3 秒内被强制结束，Anthropic 网段连 TUN 也被拦截。" : "结束 Claude 桌面版和 Claude Code，之后打开也会被结束。")
+                    Text(inMode ? "Claude 已隔离：打开会被立即结束，Anthropic 网段连 TUN 也被拦截。" : "结束 Claude 桌面版、Claude Code 和它们启动的进程，之后打开也会被结束。")
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("隔离 Claude") { model.admin(["isolate"]) }.disabled(inMode)
-                }.padding(6)
+                }
             }
-            GroupBox("② 处理你的事情") {
-                Text("现在可以在 FlClash 里切换模式或关闭代理。注意：断网保护仍在，若关闭了它，代理断开时其他程序会走真实 IP。完成后把 FlClash 恢复为正常节点、全局模式、TUN 开启。")
-                    .fixedSize(horizontal: false, vertical: true).padding(6)
+            WizardStep(number: 2, title: "处理你的事情", done: false) {
+                Text("现在可以在 FlClash 里切换节点或模式。完成后把 FlClash 恢复为白名单节点、全局模式、TUN 开启。")
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            GroupBox("③ 核对出口并退出") {
-                VStack(alignment: .leading) {
-                    Line(label: "普通出口", value: o?.egress ?? "未取得", ok: o?.egress_ok)
-                    Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
-                    HStack {
-                        Spacer()
-                        Button("核对并退出真实 IP 模式") { model.admin(["unisolate"]) }
-                            .disabled(!inMode || s?.guardInfo?.lockdown == true)
-                    }
-                }.padding(6)
+            WizardStep(number: 3, title: "核对出口并退出", done: false) {
+                Line(label: "普通出口", value: o?.egress ?? "未取得", ok: o?.egress_ok)
+                Line(label: "claude.ai", value: o?.claude_egress ?? "未取得", ok: o?.claude_egress_ok)
+                HStack {
+                    Spacer()
+                    Button("核对并退出真实 IP 模式") { model.admin(["unisolate"]) }
+                        .disabled(!inMode || s?.guardInfo?.lockdown == true)
+                }
             }
             HStack {
                 if model.busy { ProgressView().controlSize(.small) }
@@ -705,41 +947,92 @@ struct RealIpWizard: View {
                 Button("关闭") { isPresented = false }.keyboardShortcut(.cancelAction)
             }
         }
-        .padding(20)
-        .frame(width: 520)
+        .padding(22)
+        .frame(width: 540)
     }
 }
 
-struct RecordsView: View {
-    @ObservedObject var model: Model
-    @State private var onlyImportant = false
+struct WizardStep<Content: View>: View {
+    let number: Int
+    let title: String
+    let done: Bool
+    @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading) {
-            Toggle("只看触发 / 解除 / 回滚 / 恢复 / 设置", isOn: $onlyImportant).padding([.top, .horizontal])
-            List {
-                ForEach(Array(filtered.enumerated()), id: \.offset) { _, e in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(fmtTime(e.ts)).font(.system(.caption, design: .monospaced)).foregroundColor(.secondary)
-                            Text(eventNames[e.type ?? ""] ?? (e.type ?? "?")).bold()
-                                .foregroundColor(color(e.severity))
-                            Text(e.summary ?? "").fixedSize(horizontal: false, vertical: true)
-                        }
-                        ForEach(Array((e.reasons ?? []).enumerated()), id: \.offset) { _, r in
-                            Text("  · \(r.text ?? "")（\(r.level ?? "")）\(r.why ?? "")")
-                                .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .padding(.vertical, 2)
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(done ? Color.green : Color.accentColor).frame(width: 24, height: 24)
+                if done {
+                    Image(systemName: "checkmark").font(.caption.weight(.bold)).foregroundStyle(.white)
+                } else {
+                    Text(String(number)).font(.callout.weight(.semibold)).foregroundStyle(.white)
                 }
             }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(.headline)
+                content
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(panelFill))
+    }
+}
+
+// MARK: Records
+
+struct RecordsView: View {
+    @ObservedObject var model: Model
+    @AppStorage("records.filter") private var filter = "important"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Picker("", selection: $filter) {
+                    Text("重要").tag("important")
+                    Text("全部").tag("all")
+                }
+                .labelsHidden().pickerStyle(.segmented).frame(width: 160)
+                Text("\(filtered.count) 条").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("打开完整日志") { NSWorkspace.shared.open(URL(fileURLWithPath: ngRoot + "/netguard.log")) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            Divider()
+            List {
+                ForEach(Array(filtered.enumerated()), id: \.offset) { _, e in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Circle().fill(color(e.severity)).frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(fmtTime(e.ts)).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                                Text(eventNames[e.type ?? ""] ?? (e.type ?? "?"))
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 6).padding(.vertical, 1)
+                                    .background(Capsule().fill(color(e.severity).opacity(0.15)))
+                            }
+                            Text(e.summary ?? "").font(.callout).fixedSize(horizontal: false, vertical: true)
+                            ForEach(Array((e.reasons ?? []).enumerated()), id: \.offset) { _, r in
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("原因：\(r.text ?? "")（\(r.level ?? "")风险）").font(.caption.weight(.medium))
+                                    if let why = r.why, !why.isEmpty, why != r.text {
+                                        Text(why).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .textSelection(.enabled)
+                }
+            }
+            .listStyle(.inset)
         }
     }
 
     var filtered: [NGEvent] {
-        if !onlyImportant { return model.events }
+        if filter == "all" { return model.events }
         let keep: Set<String> = ["trigger", "release", "release_refused", "rollback", "recover", "rules_restored",
-                                 "config", "dns_relaxed", "exempt", "isolate", "unisolate"]
+                                 "config", "dns_relaxed", "exempt", "isolate", "unisolate", "cleanup", "anthropic_moved"]
         return model.events.filter { keep.contains($0.type ?? "") }
     }
 
@@ -747,7 +1040,48 @@ struct RecordsView: View {
         switch s {
         case "高": return .red
         case "中": return .orange
-        default: return .primary
+        case "低": return .blue
+        default: return .gray
+        }
+    }
+}
+
+// MARK: Maintenance
+
+struct SettingsGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline).padding(.leading, 4)
+            VStack(alignment: .leading, spacing: 0) { content }
+                .padding(.horizontal, 14).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 10).fill(panelFill))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(panelStroke, lineWidth: 0.5))
+        }
+    }
+}
+
+/// Description on the left, the control on the right, like System Settings.
+struct SettingRow<Control: View>: View {
+    let title: String
+    let detail: String
+    var last = false
+    @ViewBuilder var control: Control
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.body.weight(.medium))
+                    if !detail.isEmpty {
+                        Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 12)
+                control
+            }
+            .padding(.vertical, 10)
+            if !last { Divider() }
         }
     }
 }
@@ -756,142 +1090,142 @@ struct MaintenanceView: View {
     @ObservedObject var model: Model
     @State private var newIP = ""
     @State private var verifyOutput = ""
+
     var body: some View {
+        let s = model.status
+        let direct = s?.proxyDown == "direct"
+        let policy = s?.claude?.policy ?? "full"
+        let check = s?.directCheck
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Card(title: "出口白名单") {
-                    let wl = model.status?.whitelist ?? []
-                    if wl.isEmpty { Text("白名单为空：断网保护和解除锁定都会被拒绝。").foregroundColor(.orange) }
+            VStack(alignment: .leading, spacing: 18) {
+                SettingsGroup(title: "保护设置") {
+                    SettingRow(title: "代理断开时",
+                               detail: direct ? "浏览器等程序用真实 IP 上网；Claude 立即隔离，Anthropic 网段和 Claude 的其他 \(plain(s?.directBlock)) 个地址只能经代理访问；代理恢复且检查通过后自动解除。" : "整台电脑只剩局域网可用，任何程序都不会用真实 IP 联网。") {
+                        Picker("", selection: Binding(get: { direct ? "direct" : "block" }, set: { setProxyDown($0) })) {
+                            Text("整机断网").tag("block")
+                            Text("允许直连").tag("direct")
+                        }
+                        .labelsHidden().pickerStyle(.segmented).frame(width: 190)
+                    }
+                    if direct {
+                        SettingRow(title: "Claude 主站网段",
+                                   detail: check == nil ? "尚未核对（每 10 分钟经代理核对一次）" : ((check?.moved ?? []).isEmpty ? "claude.ai 等主站仍在 Anthropic 网段内，\(fmtTime(check?.at)) 核对" : "不在官方网段：" + (check?.moved ?? []).joined(separator: "、"))) {
+                            let t = check == nil ? Tone.neutral : ((check?.moved ?? []).isEmpty ? Tone.ok : Tone.bad)
+                            Image(systemName: t.symbol).foregroundStyle(t.color).font(.title3)
+                        }
+                    }
+                    SettingRow(title: "Claude 退出后清理", detail: (cleanupNames[policy] ?? policy) + "。桌面版运行时一律放行；更新程序不会被打断。") {
+                        Picker("", selection: Binding(get: { policy }, set: { p in if p != policy { model.admin(["cleanup", p]) } })) {
+                            Text("全部").tag("full")
+                            Text("仅桌面版").tag("desktop")
+                            Text("关闭").tag("off")
+                        }
+                        .labelsHidden().pickerStyle(.segmented).frame(width: 220)
+                    }
+                    SettingRow(title: "自动防护", detail: "每 10 秒检查出口、规则、代理和 ClaudeGuard，异常时隔离 Claude。关闭不影响断网规则和现有锁定。", last: true) {
+                        Toggle("", isOn: Binding(get: { s?.guardInfo?.enabled == true }, set: { on in
+                            if on { model.admin(["guard-on"]) }
+                            else if confirm("关闭自动防护？", "不影响断网保护规则和现有锁定，但不再自动锁定 Claude。") { model.admin(["guard-off"]) }
+                        }))
+                        .labelsHidden().toggleStyle(.switch)
+                    }
+                }
+
+                SettingsGroup(title: "出口白名单") {
+                    let wl = s?.whitelist ?? []
+                    if wl.isEmpty {
+                        Text("白名单为空：断网保护和解除锁定都会被拒绝。").foregroundStyle(.orange).padding(.vertical, 10)
+                        Divider()
+                    }
                     ForEach(wl, id: \.self) { ip in
-                        HStack {
-                            Text(ip).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            Spacer()
-                            Button("删除") {
-                                if confirm("从白名单删除 \(ip)？", "删除后，出口为该 IP 时会被判定为不在白名单。") {
-                                    model.admin(["whitelist", "remove", ip])
+                        VStack(spacing: 0) {
+                            HStack {
+                                Text(ip).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                                Spacer()
+                                Button("删除") {
+                                    if confirm("从白名单删除 \(ip)？", "删除后，出口为该 IP 时会被判定为不在白名单。断网保护开启时不能删除最后一个。") {
+                                        model.admin(["whitelist", "remove", ip])
+                                    }
                                 }
                             }
+                            .padding(.vertical, 8)
+                            Divider()
                         }
                     }
                     HStack {
-                        TextField("节点出口 IP 或网段", text: $newIP).textFieldStyle(.roundedBorder).frame(width: 240)
+                        TextField("节点出口 IP 或网段", text: $newIP).textFieldStyle(.roundedBorder).frame(width: 220)
                         Button("添加") {
                             model.admin(["whitelist", "add", newIP.trimmingCharacters(in: .whitespaces)]) { ok, text in
                                 if ok { newIP = "" }
                                 showResult(ok, text)
                             }
                         }.disabled(newIP.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Spacer()
                         Button("从 ClaudeGuard 导入") { model.admin(["whitelist", "import-claudeguard"]) }
                     }
+                    .padding(.vertical, 10)
                 }
-                Card(title: "代理断开时") {
-                    let direct = model.status?.proxyDown == "direct"
-                    Line(label: "当前", value: direct
-                         ? "允许直连：浏览器等程序用真实 IP 上网；Claude 立即隔离，代理恢复且检查通过后自动解除"
-                         : "整机断网：只剩局域网可用，任何程序都不会用真实 IP 联网")
-                    HStack {
-                        Button("整机断网（默认）") {
-                            if confirm("代理断开时整机断网？", "代理一断，整台电脑只剩局域网可用。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
-                                model.admin(["proxy-down", "block"])
-                            }
-                        }.disabled(!direct)
-                        Button("允许直连") {
-                            if confirm("代理断开时允许直连？", "代理断开后，浏览器等程序会用真实 IP 上网；Claude 会被立即隔离，Anthropic 网段和 Claude 的其他已知地址仍只能经代理访问。\n\n建议关代理前先退出 Claude、关闭 claude.ai 网页。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
-                                model.admin(["proxy-down", "direct"])
-                            }
-                        }.disabled(direct)
-                    }
-                    if direct {
-                        let check = model.status?.directCheck
-                        Line(label: "拦截表", value: "Claude 的其他地址 \(Int(model.status?.directBlock ?? 0)) 个")
-                        Line(label: "主站网段", value: check == nil ? "尚未核对" :
-                             ((check?.moved ?? []).isEmpty ? "在 Anthropic 网段内（\(fmtTime(check?.at)) 核对）"
-                                                           : "不在官方网段：" + (check?.moved ?? []).joined(separator: "、")),
-                             ok: check == nil ? nil : (check?.moved ?? []).isEmpty)
-                    }
-                }
-                Card(title: "Claude 退出后清理") {
-                    let policy = model.status?.claude?.policy ?? "full"
-                    Line(label: "当前", value: cleanupNames[policy] ?? policy)
-                    HStack {
-                        ForEach(["full", "desktop", "off"], id: \.self) { p in
-                            Button(["full": "清理残留和 Claude Code", "desktop": "只清理桌面版残留", "off": "不清理"][p]!) {
-                                model.admin(["cleanup", p])
-                            }.disabled(policy == p)
-                        }
-                    }
-                    Text("桌面版退出后，结束它留下的辅助进程、Claude Code 和它们启动的 shell、MCP 服务等。桌面版运行时一律放行；更新程序不会被打断。")
-                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Card(title: "自动防护") {
-                    HStack {
-                        if model.status?.guardInfo?.enabled == true {
-                            Button("关闭自动防护") {
-                                if confirm("关闭自动防护？", "不影响断网保护规则和现有锁定，但不再自动锁定 Claude。") { model.admin(["guard-off"]) }
-                            }
-                        } else {
-                            Button("开启自动防护") { model.admin(["guard-on"]) }
-                        }
-                    }
-                }
-                Card(title: "完整自检") {
-                    HStack {
-                        Button("运行完整自检（含直连拦截测试）") {
-                            model.admin(["verify"]) { _, text in verifyOutput = text }
-                        }
-                        if model.busy { ProgressView().controlSize(.small) }
+
+                SettingsGroup(title: "检查") {
+                    SettingRow(title: "完整自检", detail: direct ? "核对出口、规则、DNS、拦截表是否真正生效、ClaudeGuard。" : "核对出口、规则、DNS、直连是否真正被拦、ClaudeGuard。") {
+                        Button("运行") { model.admin(["verify"]) { _, text in verifyOutput = text } }
                     }
                     if !verifyOutput.isEmpty {
-                        Text(verifyOutput).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
+                        ScrollView {
+                            Text(verifyOutput).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 220)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+                        .padding(.bottom, 10)
+                        Divider()
                     }
-                }
-                Card(title: "断线演练") {
-                    HStack {
-                        Button("运行自动断线演练（约 1–4 分钟）") {
-                            if confirm("运行断线演练？", "NetGuard 会自己退出 FlClash，断开约 45 秒，验证直连被拦截、约 20 秒后锁定 Claude，然后重新打开 FlClash。期间整机只能访问局域网；3 分钟内网络未恢复会自动执行紧急恢复。\n\n请先保存工作、关闭浏览器和 Claude。演练结束后 Claude 会处于锁定，需要点“解除锁定”。") {
+                    SettingRow(title: "断线演练", detail: direct ? "只用于“整机断网”模式；直连模式请按验收清单手动验证。" : "自动退出 FlClash 约 45 秒，验证直连被拦并锁定 Claude，再自动恢复（约 1–4 分钟）。", last: true) {
+                        Button("运行…") {
+                            if confirm("运行断线演练？", "NetGuard 会自己退出 FlClash，断开约 45 秒，验证直连被拦截、锁定 Claude，然后重新打开 FlClash。期间整机只能访问局域网；3 分钟内网络未恢复会自动紧急恢复。请先保存工作、关闭浏览器和 Claude。") {
                                 model.admin(["drill"]) { ok, text in verifyOutput = text; showResult(ok, text) }
                             }
                         }
-                        if model.busy { ProgressView().controlSize(.small) }
+                        .disabled(direct)
                     }
-                    Text("不需要你配合计时；每 2 秒的采样记录在 /Library/NetGuard/drill-*.jsonl。")
-                        .font(.caption).foregroundColor(.secondary)
                 }
-                Card(title: "ClaudeGuard") {
-                    HStack {
-                        Button("修复 ClaudeGuard（兼容补丁 + doctor）") { model.repairClaudeGuard() }
+
+                SettingsGroup(title: "维护工具") {
+                    SettingRow(title: "修复 ClaudeGuard", detail: "Claude 更新后显示“记录过期”时使用：应用兼容补丁，再运行 claudeguard doctor。") {
+                        Button("修复") { model.repairClaudeGuard() }
                     }
-                    Text("先应用 NetGuard 的 ClaudeGuard 兼容补丁（校验哈希，只改一行），再运行 claudeguard doctor 重新挂上 claude 命令和桌面版；Claude 更新后显示“记录过期”时使用。")
-                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Card(title: "安装与更新") {
-                    let src = model.status?.source
-                    Line(label: "安装来源", value: "\(src?.repo ?? "未记录") @ \(src?.commit ?? "?")（\(src?.installed_at ?? "?")）")
-                    HStack {
-                        Button("检查并安全更新界面") { model.update() }
-                        Button("卸载 NetGuard…") { model.uninstall() }
+                    SettingRow(title: "界面更新", detail: model.guiUpdateMessage + "（只替换界面；保护组件更新需完整升级）") {
+                        Button("检查") { model.update() }
                     }
-                    Text(model.guiUpdateMessage).font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("自动更新仅替换界面；保护后台、断网规则和本地修复持续运行。保护组件更新需完整审核升级。")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Card(title: "文件与急救") {
-                    HStack {
-                        Button("打开 NetGuard 目录") { NSWorkspace.shared.open(URL(fileURLWithPath: ngRoot)) }
-                        Button("打开日志") { NSWorkspace.shared.open(URL(fileURLWithPath: ngRoot + "/netguard.log")) }
-                        Button("紧急恢复（移除断网规则）") {
+                    SettingRow(title: "安装来源", detail: "\(s?.source?.repo ?? "未记录") @ \(s?.source?.commit ?? "?")，\(s?.source?.installed_at ?? "?") 安装") {
+                        Button("打开目录") { NSWorkspace.shared.open(URL(fileURLWithPath: ngRoot)) }
+                    }
+                    SettingRow(title: "紧急恢复", detail: "移除 NetGuard 的全部规则并关闭断网保护。没有网络时也可以双击“应用程序”里的“NetGuard 紧急恢复”。") {
+                        Button("紧急恢复…") {
                             if confirm("执行紧急恢复？", "会移除 NetGuard 的全部 pf 规则并关闭断网保护。只在断网且无法恢复时使用。") {
                                 NSWorkspace.shared.open(URL(fileURLWithPath: recoverCommand))
                             }
                         }
                     }
-                    Text("没有网络时也可以双击“应用程序”里的“NetGuard 紧急恢复”，或在终端运行 sudo /Library/NetGuard/bin/netguard-recover")
-                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                    SettingRow(title: "卸载 NetGuard", detail: "移除规则、后台、菜单栏程序和急救入口，配置与记录保留一份副本。", last: true) {
+                        Button("卸载…") { model.uninstall() }
+                    }
                 }
             }
             .padding(16)
+        }
+    }
+
+    func setProxyDown(_ value: String) {
+        let current = model.status?.proxyDown == "direct" ? "direct" : "block"
+        guard value != current else { return }
+        if value == "direct" {
+            if confirm("代理断开时允许直连？", "代理断开后，浏览器等程序会用真实 IP 上网；Claude 会被立即隔离，Anthropic 网段和 Claude 的其他已知地址仍只能经代理访问。建议关代理前先退出 Claude、关闭 claude.ai 网页。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
+                model.admin(["proxy-down", "direct"])
+            }
+        } else if confirm("代理断开时整机断网？", "代理一断，整台电脑只剩局域网可用。切换会重新开启断网保护并自检（需要代理此刻正常）。") {
+            model.admin(["proxy-down", "block"])
         }
     }
 }
