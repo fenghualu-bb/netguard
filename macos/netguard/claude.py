@@ -39,6 +39,19 @@ DOMAINS = (
     "anthropic.ai", "www.anthropic.ai", "api.anthropic.ai",
 )
 
+# Direct mode. MAIN_HOSTS must resolve inside Anthropic's ranges (checked every 10 minutes;
+# otherwise the browser could open Claude with the real IP). AUX_HOSTS are Claude's other
+# hosts (assets, CDN, user content, telemetry): their real addresses go into the ng_direct
+# table. Status pages and anthropic.ai are left out on purpose: they sit on shared CloudFront
+# / AWS addresses, so blocking them would also block unrelated sites.
+MAIN_HOSTS = ("claude.ai", "www.claude.ai", "claude.com", "www.claude.com", "anthropic.com",
+              "www.anthropic.com", "api.anthropic.com", "console.anthropic.com", "platform.claude.com",
+              "code.claude.com")
+AUX_HOSTS = ("assets.claude.ai", "a-cdn.claude.ai", "a-api.claude.ai", "app.claude.ai", "api.claude.ai",
+             "auth.claude.ai", "a-cdn.anthropic.com", "a-api.anthropic.com", "assets.anthropic.com",
+             "claude.usercontent.com", "statsig.anthropic.com", "events.anthropic.com",
+             "feedback.anthropic.com", "desktop-app-updates.anthropic.com")
+
 # Installed locations of the guards themselves; never a target, even as a Claude child.
 GUARD_PATHS = ("/ClaudeExitGuard.app/", "/ClaudeGuard.app/", "/NetGuard.app/",
                "/.local/share/ClaudeGuard/", "/Library/NetGuard/")

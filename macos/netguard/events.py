@@ -18,6 +18,8 @@ RISK = {
     "claude_path": ("高", "Claude 已更新或重装，ClaudeGuard 的钩子没有跟上：直接运行 claude 或打开 Claude 时可能绕过 ClaudeGuard 的出口检查。"),
     "mode": ("中", "FlClash 不是全局模式：规则模式下 Claude 的部分流量可能被分流为直连（Anthropic 官方网段仍会被拦截，claude.ai 走 Cloudflare 的部分只能靠出口检查发现）。"),
     "guard_off": ("中", "ClaudeGuard 的保护被关闭：出口不对时它不会拦截 Claude，只剩 NetGuard 每 10 秒一次的检查。"),
+    "proxy_down": ("高", "代理已断开（直连模式）：其他程序改用真实 IP 上网，所以 Claude 立即被隔离；代理恢复且全部检查通过后自动解除。"),
+    "anthropic_moved": ("高", "Claude 主站解析到的地址不在 Anthropic 官方网段内：直连模式下浏览器可能用真实 IP 打开它。该地址已加入拦截表，请核对官方网段（config.json 的 anthropic_v4/v6）。"),
     "user": ("低", "用户主动操作，不是异常。"),
     "error": ("中", "检查过程出错，无法确认当前是否安全。"),
 }

@@ -32,13 +32,15 @@ jobs:
           done
       - name: Rendered rules pass pfctl syntax check (no load)
         run: |
-          for variant in "False False" "True False" "False True" "True True"; do
+          for variant in "False False False" "True False False" "False True False" "True True False" \
+                         "False False True" "False True True"; do
             set -- $variant
             /usr/bin/python3 -c "
           import sys; sys.path.insert(0, 'macos')
           from netguard import config, pfrules
-          print(pfrules.render(config.validate({}), 0, 20, dns_block=$1, isolate=$2))" > /tmp/rules.conf
-            echo "--- dns_block=$1 isolate=$2"; cat /tmp/rules.conf
+          print(pfrules.render(config.validate({}), 0, 20, dns_block=$1, isolate=$2, direct=$3,
+                               direct_block=['34.120.108.227', '2600:3c01::1'] if $3 else ()))" > /tmp/rules.conf
+            echo "--- dns_block=$1 isolate=$2 direct=$3"; cat /tmp/rules.conf
             sudo /sbin/pfctl -n -a 'com.apple/zz.NetGuard' -f /tmp/rules.conf
           done
       - name: ClaudeGuard compatibility patch against the pinned upstream file

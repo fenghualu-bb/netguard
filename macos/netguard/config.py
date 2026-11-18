@@ -32,6 +32,10 @@ DEFAULTS = {
     # then kept open and the decision is recorded. true = always block (enable fails if DNS
     # breaks), false = never block.
     "block_lan_dns": "auto",
+    # What happens when the proxy is off. "block" = the whole Mac reaches only the LAN (kill
+    # switch). "direct" = other programs may use the real IP; Claude is isolated at once and
+    # Anthropic's ranges plus Claude's other hosts stay refused outside the TUN.
+    "proxy_down": "block",
     # Require FlClash global mode (rule mode can send Claude DIRECT). Windows only displays it.
     "require_global_mode": True,
     "anthropic_v4": ANTHROPIC_V4,
@@ -95,6 +99,8 @@ def validate(data):
         raise ConfigError("config_version 必须是整数")
     if cfg["block_lan_dns"] not in (True, False, "auto"):
         raise ConfigError('block_lan_dns 只能是 true、false 或 "auto"')
+    if cfg["proxy_down"] not in ("block", "direct"):
+        raise ConfigError('proxy_down 只能是 "block" 或 "direct"')
     if cfg["claude_cleanup"] not in ("full", "desktop", "off"):
         raise ConfigError('claude_cleanup 只能是 "full"、"desktop" 或 "off"')
     targets = []

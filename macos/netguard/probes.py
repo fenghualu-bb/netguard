@@ -255,6 +255,50 @@ class Probes:
                     found.add(str(addr))
         return sorted(found)
 
+    DOH_URL = "https://cloudflare-dns.com/dns-query?name=%s&type=%s"
+
+    def resolve_public(self, domains, via="doh"):
+        """Real public addresses of `domains` -> {domain: [ip, ...]}.
+
+        via="doh": DNS over HTTPS through the proxy, which bypasses FlClash's fake-ip
+        answers. via="system": the Mac's own resolver, i.e. what a browser gets when the
+        proxy is off (a CDN may answer differently by location). Private, loopback and
+        TUN-range answers are dropped.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        tun = [ipaddress.ip_network(self.cfg["tun_v4"], strict=False),
+               ipaddress.ip_network(self.cfg["tun_v6"], strict=False)]
+
+        def one(job):
+            name, rtype = job
+            if via == "doh":
+                result = self.runner([paths.CURL, "-q", "-s", "--max-time", "6", "--noproxy", "*",
+                                      "-H", "accept: application/dns-json", self.DOH_URL % (name, rtype)],
+                                     timeout=10)
+                try:
+                    answers = json.loads(result.stdout or "{}").get("Answer") or []
+                    return [str(a.get("data", "")) for a in answers if a.get("type") in (1, 28)]
+                except (ValueError, AttributeError):
+                    return []
+            result = self.runner([paths.DIG, "+short", "+time=2", "+tries=1", rtype, name], timeout=6)
+            return (result.stdout or "").split() if result.returncode == 0 else []
+
+        jobs = [(d, t) for d in domains for t in ("A", "AAAA")]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            outputs = list(pool.map(one, jobs))
+        found = {d: set() for d in domains}
+        for (name, _), values in zip(jobs, outputs):
+            for value in values:
+                try:
+                    addr = ipaddress.ip_address(value.strip())
+                except ValueError:
+                    continue  # CNAME targets
+                if addr.is_private or addr.is_loopback or addr.is_unspecified or \
+                        any(addr.version == n.version and addr in n for n in tun):
+                    continue
+                found[name].add(str(addr))
+        return {d: sorted(v) for d, v in found.items()}
+
     def dns_ok(self, name="www.apple.com"):
         result = self.runner([paths.DSCACHEUTIL, "-q", "host", "-a", "name", name], timeout=10)
         return result.returncode == 0 and "ip_address" in (result.stdout or "")

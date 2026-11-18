@@ -36,6 +36,8 @@ class FakePfctl:
         self.calls = []
         self.fail_load = False
         self.table = None  # None = no ng_claude table
+        self.direct = None  # contents of the ng_direct table (direct mode)
+        self.direct_ops = []
         self.main_extra = []      # extra main-ruleset lines after the com.apple/* anchor
         self.foreign = {}         # other anchor name -> rules text (siblings or main anchors)
 
@@ -61,6 +63,21 @@ class FakePfctl:
             self.anchor_text = input
             if "table <ng_claude>" in input:
                 self.table = []  # a reload empties the declared table
+            import re as _re
+            m = _re.search(r"table <ng_direct> persist(?: \{ ([^}]*) \})?", input)
+            self.direct = sorted(x.strip() for x in m.group(1).split(",")) if m and m.group(1) else ([] if m else None)
+            return ok()
+        if a[:4] == ["-a", paths.ANCHOR, "-t", "ng_direct"]:
+            op = a[5]
+            self.direct_ops.append([op] + a[6:])
+            if op == "show":
+                return ok("".join("   %s\n" % x for x in (self.direct or [])))
+            if op == "add":
+                self.direct = sorted(set((self.direct or []) + a[6:]))
+            elif op == "delete":
+                self.direct = [x for x in (self.direct or []) if x not in a[6:]]
+            elif op == "kill":
+                self.direct = None
             return ok()
         if a[:4] == ["-a", paths.ANCHOR, "-t", "ng_claude"]:
             op = a[5]
@@ -112,6 +129,7 @@ class FakePfctl:
         self.anchor_text = ""
         self.tokens = []
         self.table = None
+        self.direct = None
 
 
 class FakeProbes:
@@ -143,6 +161,14 @@ class FakeProbes:
         self.args = {}
         self.fake_ips = ["198.18.0.58", "198.18.0.79"]
         self.resolve_calls = 0
+
+    def resolve_public(self, domains, via="doh"):
+        self.resolve_public_calls = getattr(self, "resolve_public_calls", []) + [via]
+        answers = getattr(self, "public_answers", None)
+        if answers is None:
+            answers = {"claude.ai": ["160.79.104.10"], "assets.claude.ai": ["34.120.108.227"],
+                       "claude.usercontent.com": ["23.239.4.93", "2600:3c01::1"]}
+        return {d: list(answers.get(d, [])) for d in domains}
 
     def tun_addresses(self, domains, resolver="1.1.1.1"):
         self.resolve_calls += 1

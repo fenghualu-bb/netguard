@@ -25,7 +25,12 @@ CONFIRM = 2
 INTERVAL = 10
 # An exit outside the whitelist is not a flaky reading: every second Claude keeps running,
 # Anthropic sees a non-whitelisted IP. These lock on the first sighting (also inside grace).
-IMMEDIATE = ("egress", "egress_claude")
+IMMEDIATE = ("egress", "egress_claude", "proxy_down", "anthropic_moved")
+# Direct mode: a lockdown caused only by the proxy being off lifts itself once the proxy is
+# back and every release check passes (the same checks as a manual release).
+AUTO_RELEASE_CODES = {"proxy_down", "core", "tun"}
+DIRECT_REFRESH = 600          # re-resolve Claude's hosts for the ng_direct table this often
+DIRECT_KEEP = 7 * 86400       # an address not seen for this long leaves the table
 EGRESS_FAST = 3  # between full checks, the ordinary exit is re-read this often
 ENFORCE_EVERY = 2
 ENFORCE_ISOLATED = 0.25  # dedicated thread: a relaunched Claude is ended within about a quarter second
@@ -39,7 +44,8 @@ CLAUDE_TABLE_EVERY = 60  # re-resolve Claude's fake-ip addresses while isolated
 DNS_PROBLEM = "DNS 解析失败"
 
 STATE_DEFAULTS = {"killswitch": False, "claude_block": False, "core_uid": 0, "core_gid": None,
-                  "rules_fp": None, "pending": None, "dns_block": False}
+                  "rules_fp": None, "pending": None, "dns_block": False,
+                  "direct": False, "direct_block": {}, "direct_check": None}
 GUARD_DEFAULTS = {"enabled": True, "lockdown": False, "since": 0, "reasons": [], "reason_codes": [], "bad_streak": 0,
                   "last_check": 0, "last_findings": [], "triggers": 0, "grace_until": 0,
                   "grace_noted": 0, "observations": {}}
@@ -76,6 +82,80 @@ class Service:
         self._claude_table = {"at": 0, "count": None}
         self._last_fast = 0
         self._cfg_stamp = self._config_stamp()
+        self._direct = {"running": False, "result": None, "at": 0, "via": None}
+        self._spawn = self._spawn_thread
+
+    @staticmethod
+    def _spawn_thread(fn):
+        import threading
+        threading.Thread(target=fn, name="netguard-direct-resolve", daemon=True).start()
+
+    # ------------------------------------------------------------------ direct mode: Claude's hosts
+    def resolve_direct_hosts(self, via):
+        """Blocking (seconds). Real addresses of Claude's hosts and the main-host range check."""
+        import ipaddress
+        nets = [ipaddress.ip_network(n) for n in self.cfg["anthropic_v4"] + self.cfg["anthropic_v6"]]
+
+        def inside(ip):
+            addr = ipaddress.ip_address(ip)
+            return any(addr.version == n.version and addr in n for n in nets)
+        answers = self.probes.resolve_public(claude.MAIN_HOSTS + claude.AUX_HOSTS, via=via)
+        moved = sorted(set(ip for h in claude.MAIN_HOSTS for ip in answers.get(h, []) if not inside(ip)))
+        aux = sorted(set(ip for h in claude.AUX_HOSTS for ip in answers.get(h, []) if not inside(ip)))
+        return {"at": int(self.clock()), "via": via, "aux": aux, "moved": moved,
+                "answered": sum(1 for v in answers.values() if v)}
+
+    def start_direct_refresh(self, via):
+        if self._direct["running"]:
+            return
+        self._direct.update(running=True, at=self.clock(), via=via)
+
+        def job():
+            try:
+                self._direct["result"] = self.resolve_direct_hosts(via)
+            except Exception as exc:
+                util.log("Claude 地址解析失败：%s" % exc, "direct")
+            finally:
+                self._direct["running"] = False
+        self._spawn(job)
+
+    def merge_direct(self, state, result):
+        """Fold one resolution into the ng_direct table (kept DIRECT_KEEP). True if it changed."""
+        if not result or not result.get("answered"):
+            return False  # nothing resolved (offline): keep what is loaded
+        now = int(self.clock())
+        before = set(self.direct_block(state))
+        table = dict(state.get("direct_block") or {})
+        for ip in result["aux"] + result["moved"]:
+            table[ip] = now
+        table = {ip: seen for ip, seen in table.items() if now - int(seen) < DIRECT_KEEP}
+        state["direct_block"] = table
+        old_moved = set((state.get("direct_check") or {}).get("moved") or [])
+        state["direct_check"] = {k: result[k] for k in ("at", "via", "moved", "answered")}
+        if result["moved"] and set(result["moved"]) != old_moved:
+            events.add("anthropic_moved", "Claude 主站解析到 Anthropic 网段以外的地址，已加入拦截表：%s"
+                       % "、".join(result["moved"]), [events.finding("anthropic_moved", "主站地址不在官方网段")])
+        return set(table) != before
+
+    def direct_housekeeping(self, state, obs):
+        """Called from tick with the lock held: apply a finished resolution, start the next."""
+        if not self.direct_on(state):
+            return
+        result, self._direct["result"] = self._direct["result"], None
+        if result and self.merge_direct(state, result):
+            try:
+                self.refresh_rules(state)
+                util.log("直连模式拦截表更新为 %d 个地址" % len(state["direct_block"]), "direct")
+            except pfrules.PFError as exc:
+                util.log("直连模式拦截表加载失败：%s" % exc, "direct")
+        elif result:
+            self.write_state(state)
+        via = "doh" if obs.get("proxy_up") else "system"
+        check = state.get("direct_check") or {}
+        last = max(float(check.get("at") or 0), float(self._direct["at"]))
+        last_via = self._direct["via"] or check.get("via")
+        if self.clock() - last >= DIRECT_REFRESH or via != last_via:
+            self.start_direct_refresh(via)
 
     # ------------------------------------------------------------------ config
     @staticmethod
@@ -206,10 +286,24 @@ class Service:
         return stop, thread
 
     # ------------------------------------------------------------------ pf
+    @staticmethod
+    def direct_on(state):
+        return bool(state.get("killswitch") and state.get("direct"))
+
+    @staticmethod
+    def direct_block(state):
+        return sorted((state.get("direct_block") or {}).keys())
+
+    def integrity(self, state, fp=None):
+        direct = bool(state.get("direct"))
+        return self.pf.integrity(state.get("rules_fp") if fp is None else fp, direct=direct,
+                                 direct_block=self.direct_block(state) if direct else None)
+
     def apply_rules(self, core_gid, state=None):
         state = state if state is not None else self.read_state()
         text = pfrules.render(self.cfg, 0, core_gid, dns_block=bool(state.get("dns_block")),
-                              isolate=bool(state.get("claude_block")))
+                              isolate=bool(state.get("claude_block")), direct=bool(state.get("direct")),
+                              direct_block=self.direct_block(state))
         self.pf.load(text)
         util.write_text(paths.ANCHOR_FILE, text, mode=0o644)
         token = self.pf.acquire_token(self.read_token())
@@ -246,6 +340,7 @@ class Service:
     def remove_rules(self):
         self.pf.flush()
         self.pf.drop_claude_table()
+        self.pf.drop_direct_table()
         self._claude_table = {"at": 0, "count": None}
         self.pf.release_token(self.read_token())
         self.clear_token()
@@ -259,7 +354,7 @@ class Service:
 
     def ensure_rules(self, state):
         """Re-establish wanted rules (after boot, a foreign `pfctl -d`, a flush). Never weakens."""
-        integ = self.pf.integrity(state.get("rules_fp"))
+        integ = self.integrity(state)
         live = self.token_live()
         if integ.get("read_error") or (integ["rules_match"] and integ["pf_enabled"] and live):
             # A missing main-ruleset reference (Internet Sharing) cannot be fixed without
@@ -278,7 +373,7 @@ class Service:
             if restored:
                 events.add("rules_restored", "已重新加载断网保护规则（开机后或规则被外部清除）")
                 util.log("rules restored", "watch")
-            integ = self.pf.integrity(fp)
+            integ = self.integrity(state, fp)
         except pfrules.PFError as exc:
             integ["error"] = str(exc)
         integ["token_live"] = self.token_live()
@@ -292,6 +387,7 @@ class Service:
 
     def rollback(self, state, prev, reason):
         state["dns_block"] = bool(prev.get("dns_block"))
+        state["direct"] = bool(prev.get("direct"))
         if prev.get("killswitch") and prev.get("core_gid"):
             state["rules_fp"] = self.apply_rules(prev["core_gid"], state)
         else:
@@ -324,20 +420,33 @@ class Service:
         elif state.get("killswitch") and not wl:
             # Without a whitelist no exit can be judged, so the exit guard would silently stop.
             f.append(events.finding("egress", "白名单为空，无法核对出口是否安全"))
-        ip = self.probes.egress(cfg["check_url"])
-        obs["egress"] = ip
-        obs["egress_ok"] = config.ip_in_whitelist(ip, wl)
-        if require and not ip:
-            f.append(events.finding("egress", "普通出口未取得，保持锁定"))
-        if ip and wl and not obs["egress_ok"]:
-            f.append(events.finding("egress", "普通出口 %s 不在白名单" % ip))
-        cip = self.probes.claude_egress(cfg["claude_check_url"], isolated=bool(state.get("claude_block")))
-        obs["claude_egress"] = cip
-        obs["claude_egress_ok"] = config.ip_in_whitelist(cip, wl)
-        if require and not cip:
-            f.append(events.finding("egress_claude", "claude.ai 出口未取得，保持锁定"))
-        if cip and wl and not obs["claude_egress_ok"]:
-            f.append(events.finding("egress_claude", "claude.ai 出口 %s 不在白名单" % cip))
+        tun = self.probes.tun_interface()
+        route = self.probes.route_interface()
+        proxy_up = bool(tun) and (not route or route == tun)
+        obs.update(tun=tun, route=route, proxy_up=proxy_up)
+        direct_down = self.direct_on(state) and not proxy_up
+        obs["proxy_down_direct"] = direct_down
+        if direct_down:
+            # Direct mode with the proxy off: the exit IS the real IP by the user's choice, so it
+            # is not probed (nothing to learn, and no request needs to go out with it). Claude is
+            # isolated until the proxy carries traffic again and every check below passes.
+            obs.update(egress=None, egress_ok=False, claude_egress=None, claude_egress_ok=False)
+            f.append(events.finding("proxy_down", "代理已断开（直连模式）：其他程序可用真实 IP 上网，Claude 保持隔离"))
+        else:
+            ip = self.probes.egress(cfg["check_url"])
+            obs["egress"] = ip
+            obs["egress_ok"] = config.ip_in_whitelist(ip, wl)
+            if require and not ip:
+                f.append(events.finding("egress", "普通出口未取得，保持锁定"))
+            if ip and wl and not obs["egress_ok"]:
+                f.append(events.finding("egress", "普通出口 %s 不在白名单" % ip))
+            cip = self.probes.claude_egress(cfg["claude_check_url"], isolated=bool(state.get("claude_block")))
+            obs["claude_egress"] = cip
+            obs["claude_egress_ok"] = config.ip_in_whitelist(cip, wl)
+            if require and not cip:
+                f.append(events.finding("egress_claude", "claude.ai 出口未取得，保持锁定"))
+            if cip and wl and not obs["claude_egress_ok"]:
+                f.append(events.finding("egress_claude", "claude.ai 出口 %s 不在白名单" % cip))
         cores = self.probes.find_core()
         obs["core"] = {"running": bool(cores), "privileged": any(c["privileged"] for c in cores),
                        "uid": cores[0]["uid"] if cores else None, "gid": cores[0]["gid"] if cores else None}
@@ -345,18 +454,21 @@ class Service:
             f.append(events.finding("core", "FlClash 内核未运行"))
         elif not obs["core"]["privileged"]:
             f.append(events.finding("core", "FlClash 内核未获授权（TUN 未开启），断网保护会拦住它的流量"))
-        tun = self.probes.tun_interface()
-        obs["tun"] = tun
-        obs["route"] = self.probes.route_interface()
-        if not tun:
+        if direct_down:
+            pass  # reported once as proxy_down above
+        elif not tun:
             f.append(events.finding("tun", "TUN 虚拟网卡未连接"))
-        elif obs["route"] and obs["route"] != tun:
-            f.append(events.finding("tun", "TUN 已连接，但公网流量没有经过它（路由指向 %s）" % obs["route"]))
+        elif route and route != tun:
+            f.append(events.finding("tun", "TUN 已连接，但公网流量没有经过它（路由指向 %s）" % route))
         obs["flclash_ui"] = self.probes.flclash_ui()
         fl = self.probes.flclash_config()
         obs["flclash"] = fl
-        if cfg["require_global_mode"] and fl.get("mode") in ("rule", "direct"):
+        if cfg["require_global_mode"] and fl.get("mode") in ("rule", "direct") and not direct_down:
             f.append(events.finding("mode", "FlClash 是%s模式，不是全局模式" % {"rule": "规则", "direct": "直连"}[fl["mode"]]))
+        moved = (state.get("direct_check") or {}).get("moved") if self.direct_on(state) else None
+        if moved:
+            f.append(events.finding("anthropic_moved", "Claude 主站解析到 Anthropic 网段以外的地址：%s"
+                                    % "、".join(moved)[:160]))
         if state.get("killswitch") and integ is not None:
             obs["integrity"] = integ
             # As on Windows: a failed read is not proof of missing rules (shown in status only).
@@ -365,7 +477,7 @@ class Service:
                     "（pf 主规则集缺少 com.apple/* 锚点，可能开启了“互联网共享”）"
                     if integ.get("pf_enabled") and not integ.get("main_anchor_ref") else "")))
             if integ.get("complete"):
-                permits = self.foreign_permits()
+                permits = self.foreign_permits(direct=bool(state.get("direct")))
                 obs["foreign_permits"] = ["%s：%s" % p for p in permits]
                 if permits:
                     f.append(events.finding("pf_bypass", "其他防火墙规则可能绕过断网保护（共 %d 条，第一条在 %s：%s）"
@@ -398,9 +510,9 @@ class Service:
                     f.append(events.finding("claude_path", "；".join(broken)))
         return f, obs
 
-    def foreign_permits(self):
+    def foreign_permits(self, direct=False):
         try:
-            return self.pf.foreign_permits()
+            return self.pf.foreign_permits(direct=direct)
         except pfrules.PFError:
             return []  # a failed read is not proof of a bypass
 
@@ -453,7 +565,8 @@ class Service:
         return True
 
     def check_exemption(self, state, obs):
-        if not state.get("killswitch") or not state.get("core_gid"):
+        # In direct mode there is no default block, hence no proxy-core exemption to share.
+        if not state.get("killswitch") or not state.get("core_gid") or state.get("direct"):
             return
         now = self.clock()
         if now - self._last_exempt_check < EXEMPT_CHECK_EVERY:
@@ -487,6 +600,7 @@ class Service:
             findings, obs = self.observe(state, integ)
             if self.dns_safety_valve(state, obs):
                 integ = self.ensure_rules(state)
+            self.direct_housekeeping(state, obs)
             self.check_exemption(state, obs)
             obs["dns_block"] = bool(state.get("dns_block"))
             guard["last_check"] = int(self.clock())
@@ -496,7 +610,7 @@ class Service:
             findings = self.settle(findings)
             grace = self.grace_info()
             guard["grace_until"] = int(grace["until"]) if grace["active"] else 0
-            if state["killswitch"] and not grace["active"] and \
+            if state["killswitch"] and not state.get("direct") and not grace["active"] and \
                     any(x["key"] in ("core", "tun") for x in findings):
                 self.notify("NetGuard：代理未就绪，已阻断直连",
                             "现在只能访问局域网。请打开 FlClash 并开启 TUN；急救见“NetGuard 紧急恢复”。",
@@ -508,6 +622,10 @@ class Service:
             if guard["lockdown"]:
                 if self.shutdown_artifact(guard):
                     self.try_boot_release(state, guard, integ)
+                elif self.proxy_down_artifact(state, guard) and obs.get("proxy_up"):
+                    if self.try_boot_release(state, guard, integ, message=(
+                            "代理已恢复：全部检查通过，自动解除直连模式下的 Claude 隔离")):
+                        self.notify("NetGuard：代理已恢复", "全部检查通过，Claude 可以使用了。", key="proxy-back", every=5)
                 self.write_guard(guard)
                 return guard
             if grace["active"]:
@@ -572,7 +690,13 @@ class Service:
         since = float(guard.get("since") or 0)
         return boot > 0 and since > 0 and 0 <= boot - since <= SHUTDOWN_WINDOW
 
-    def try_boot_release(self, state, guard, integ):
+    def proxy_down_artifact(self, state, guard):
+        """Direct mode: a lockdown caused only by the proxy being off (nothing high besides it)."""
+        codes = set(guard.get("reason_codes") or [])
+        return self.direct_on(state) and "proxy_down" in codes and codes <= AUTO_RELEASE_CODES
+
+    def try_boot_release(self, state, guard, integ, message=None):
+        """Lift a lockdown automatically, but only through the full checks of a manual release."""
         if not state["killswitch"]:
             return False
         findings, _ = self.observe(state, integ, require=True)
@@ -581,9 +705,10 @@ class Service:
         state["claude_block"] = False
         self.refresh_rules(state)
         guard.update({"lockdown": False, "bad_streak": 0, "reasons": [], "reason_codes": []})
-        events.add("release", "开机后自动解除：锁定发生在关机过程中（代理先于 NetGuard 退出，仅中危），"
+        message = message or ("开机后自动解除：锁定发生在关机过程中（代理先于 NetGuard 退出，仅中危），"
                               "开机后全部检查通过，Claude 可以使用")
-        util.log("开机后自动解除关机过程中产生的锁定", "watch")
+        events.add("release", message)
+        util.log(message, "watch")
         return True
 
     def enforce_isolation(self):
@@ -600,7 +725,7 @@ class Service:
         state = self.read_state()
         guard = self.read_guard()
         try:
-            integ = self.pf.integrity(state.get("rules_fp"))
+            integ = self.integrity(state)
             integ["token_live"] = self.token_live()
         except Exception as exc:  # status must always be written
             integ = {"complete": False, "error": str(exc)}
@@ -626,10 +751,26 @@ class Service:
             "require_global_mode": self.cfg["require_global_mode"],
             "last_event": last[-1] if last else None,
             "source": util.read_json(paths.SOURCE, None),
-            "claude": self.engine.status(),
+            "claude": self.claude_status(),
+            "proxy_down": self.cfg["proxy_down"],
+            "direct": bool(state.get("direct")),
+            "direct_block": len(state.get("direct_block") or {}),
+            "direct_check": state.get("direct_check"),
         }
         util.write_json(paths.STATUS, status, mode=0o644)
         return status
+
+    def claude_status(self):
+        """The daemon's process view. A CLI command that rewrites status.json has not scanned
+        anything itself, so it keeps the daemon's last view instead of showing zero."""
+        current = self.engine.status()
+        if current["checked_at"]:
+            return current
+        previous = (util.read_json(paths.STATUS, {}) or {}).get("claude")
+        if isinstance(previous, dict):
+            previous = dict(previous, policy=current["policy"])
+            return previous
+        return current
 
     def fast_egress_due(self):
         """Cheap exit re-check between full checks. True = run a full check now.
@@ -642,8 +783,11 @@ class Service:
         self.reload_config()
         guard = self.read_guard()
         wl = self.cfg["whitelist"]
-        if not guard["enabled"] or guard["lockdown"] or not wl or self.read_state()["claude_block"]:
+        state = self.read_state()
+        if not guard["enabled"] or guard["lockdown"] or not wl or state["claude_block"]:
             return False
+        if self.direct_on(state) and not self.probes.tun_interface():
+            return True  # direct mode: the proxy went away, isolate Claude now (ifconfig, ~1 ms)
         ip = self.probes.egress(self.cfg["check_url"], max_time=2)
         return bool(ip) and not config.ip_in_whitelist(ip, wl)
 
@@ -719,7 +863,26 @@ class Service:
             raise UserError("当前出口 %s 不在白名单，请先让 FlClash 回到正常节点再开启。" % ip)
         return gids[0], ip
 
-    def post_check(self):
+    def direct_canary(self):
+        """Direct mode self-test: a non-TUN connection to an address in ng_direct must fail.
+
+        A public canary (bypass_probe_targets[1]) is added to the table for the test only and
+        removed afterwards; the Anthropic-range rules have the same shape. Nothing is sent to
+        Anthropic. Returns (interfaces tested, interfaces that leaked).
+        """
+        canary = self.cfg["bypass_probe_targets"][-1]
+        physical = self.probes.physical_interfaces()
+        leaked = []
+        self.pf.direct_table_add(canary)
+        try:
+            for iface in physical:
+                if self.probes.direct_bypass(iface, canary):
+                    leaked.append(iface)
+        finally:
+            self.pf.direct_table_delete(canary)
+        return physical, leaked
+
+    def post_check(self, direct=False):
         problems = []
         if not (self.probes.dns_reachable() and self.probes.dns_ok()):
             problems.append(DNS_PROBLEM)
@@ -728,6 +891,11 @@ class Service:
             problems.append("开启后无法通过代理联网")
         elif not config.ip_in_whitelist(ip, self.cfg["whitelist"]):
             problems.append("开启后出口 %s 不在白名单" % ip)
+        if direct:
+            physical, leaked = self.direct_canary()
+            for iface in leaked:
+                problems.append("绑定物理网卡 %s 仍能直连拦截表中的地址：直连模式的拦截没有生效" % iface)
+            return problems, ip, physical
         physical = self.probes.physical_interfaces()
         for iface in physical:
             target = self.cfg["bypass_probe_targets"][0]
@@ -737,15 +905,27 @@ class Service:
 
     def enable(self, out=print):
         gid, before = self.preflight()
+        direct = self.cfg["proxy_down"] == "direct"
         mode = self.cfg["block_lan_dns"]
-        attempts = [True, False] if mode == "auto" else [bool(mode)]
+        # Direct mode never blocks LAN DNS: with the proxy off the router is the only resolver.
+        attempts = [False] if direct else ([True, False] if mode == "auto" else [bool(mode)])
+        resolved = None
+        if direct:
+            out("直连模式：正在经代理解析 Claude 各网址的真实地址（约 10 秒）……")
+            try:
+                resolved = self.resolve_direct_hosts("doh")
+            except Exception as exc:
+                util.log("开启时解析 Claude 地址失败：%s" % exc, "enable")
         with util.StateLock():
             state = self.read_state()
-            prev = {k: state.get(k) for k in ("killswitch", "core_gid", "dns_block")}
+            prev = {k: state.get(k) for k in ("killswitch", "core_gid", "dns_block", "direct")}
             state["pending"] = {"deadline": self.clock() + PENDING_SECONDS, "prev": prev}
             state["killswitch"] = True
             state["core_uid"] = 0
             state["core_gid"] = gid
+            state["direct"] = direct
+            if direct:
+                self.merge_direct(state, resolved)
             problems, after, physical = [], None, []
             for dns_block in attempts:
                 state["dns_block"] = dns_block
@@ -753,10 +933,14 @@ class Service:
                 try:
                     state["rules_fp"] = self.apply_rules(gid, state)
                     self.write_state(state)
-                    out("规则已加载（局域网 DNS：%s），正在自检（DNS、代理出口、直连是否被拦）……"
-                        % ("拦截" if dns_block else "放行"))
+                    if direct:
+                        out("规则已加载（直连模式，拦截表 %d 个地址），正在自检（DNS、代理出口、拦截表是否生效）……"
+                            % len(state["direct_block"]))
+                    else:
+                        out("规则已加载（局域网 DNS：%s），正在自检（DNS、代理出口、直连是否被拦）……"
+                            % ("拦截" if dns_block else "放行"))
                     self.sleep(2)
-                    problems, after, physical = self.post_check()
+                    problems, after, physical = self.post_check(direct=direct)
                 except Exception as exc:
                     problems, after, physical = ["加载或自检出错：%s" % exc], None, []
                 if not problems or not (dns_block and mode == "auto" and DNS_PROBLEM in problems):
@@ -767,6 +951,16 @@ class Service:
                 raise UserError("开启后自检未通过，已自动恢复，网络不受影响：\n- " + "\n- ".join(problems))
             state["pending"] = None
             self.write_state(state)
+        if direct:
+            events.add("config", "断网保护已开启（直连模式：代理断开时其他程序可用真实 IP，Claude 立即隔离；出口 %s；"
+                       "拦截表 %d 个地址）" % (after, len(state["direct_block"])),
+                       [events.finding("user", "用户开启断网保护（直连模式）")])
+            util.log("已开启（直连模式），出口 %s" % after, "enable")
+            if not physical:
+                out("提示：没找到活动的物理网卡，未做拦截表测试。")
+            out("断网保护已开启（直连模式），出口 %s。代理断开时浏览器等程序可以直连，Claude 会被立即隔离；"
+                "Anthropic 网段和 Claude 的 %d 个其他地址只能经代理访问。" % (after, len(state["direct_block"])))
+            return
         if mode == "auto" and not state["dns_block"]:
             events.add("dns_relaxed", "开启时发现系统 DNS 是局域网路由器：局域网 DNS 保持放行（只暴露查询的域名，不泄露真实 IP）")
         events.add("config", "断网保护已开启（出口 %s；局域网 DNS %s）" % (after, "拦截" if state["dns_block"] else "放行"),
@@ -775,6 +969,53 @@ class Service:
         if not physical:
             out("提示：没找到活动的物理网卡，未做直连拦截测试。")
         out("断网保护已开启，出口 %s。直连已被拦截，代理流量正常。" % after)
+
+    def set_proxy_down(self, policy, out=print):
+        """Switch between "block" (kill switch) and "direct", then re-run enable with its self-test.
+
+        Only while the proxy works (enable's preflight); a failed self-test rolls everything back,
+        including the setting.
+        """
+        if policy not in ("block", "direct"):
+            raise UserError('只能是 block 或 direct')
+        with util.StateLock():
+            cfg = config.load()
+            old = cfg["proxy_down"]
+            cfg["proxy_down"] = policy
+            self.cfg = config.save(cfg)
+            self.probes.cfg = self.engine.cfg = self.cfg
+            self._cfg_stamp = self._config_stamp()
+        events.add("config", "代理断开时：%s" % ("允许直连（Claude 立即隔离）" if policy == "direct" else "整机断网"),
+                   [events.finding("user", "用户切换代理断开时的处理方式")])
+        if not self.read_state()["killswitch"]:
+            out("已设置。断网保护尚未开启，开启时按此方式生效。")
+            return
+        try:
+            self.enable(out=out)
+        except Exception:
+            with util.StateLock():
+                cfg = config.load()
+                cfg["proxy_down"] = old
+                self.cfg = config.save(cfg)
+                self.probes.cfg = self.engine.cfg = self.cfg
+                self._cfg_stamp = self._config_stamp()
+            events.add("config", "切换未完成，已恢复原设置（%s）" % old)
+            raise
+
+    def set_cleanup(self, policy, out=print):
+        """Cleanup after quit: full / desktop / off. No pf change; the daemon reloads it within 10 s."""
+        if policy not in claude.CLEANUP_POLICIES:
+            raise UserError("只能是 full、desktop 或 off")
+        with util.StateLock():
+            cfg = config.load()
+            cfg["claude_cleanup"] = policy
+            self.cfg = config.save(cfg)
+            self.probes.cfg = self.engine.cfg = self.cfg
+            self._cfg_stamp = self._config_stamp()
+        text = {"full": "Claude 退出后清理残留进程和单独运行的 Claude Code",
+                "desktop": "Claude 退出后只清理桌面版的残留进程", "off": "Claude 退出后不清理残留进程"}[policy]
+        events.add("config", text, [events.finding("user", "用户修改退出后清理设置")])
+        out(text + "（10 秒内生效）。")
 
     def disable(self, out=print):
         with util.StateLock():
@@ -917,7 +1158,7 @@ class Service:
 
     def verify(self, out=print):
         state = self.read_state()
-        integ = self.pf.integrity(state.get("rules_fp")) if state["killswitch"] else None
+        integ = self.integrity(state) if state["killswitch"] else None
         if integ is not None:
             integ["token_live"] = self.token_live()
         findings, obs = self.observe(state, integ, require=True)
@@ -941,18 +1182,31 @@ class Service:
             row(integ["complete"], "pf 规则完整", "pf=%s 锚点引用=%s 规则=%s 条" % (
                 integ["pf_enabled"], integ["main_anchor_ref"], integ["rule_count"]))
             row(integ.get("token_live", False), "pf 启用引用（token）有效")
-            permits = self.foreign_permits()
+            permits = self.foreign_permits(direct=bool(state.get("direct")))
             row(not permits, "没有其他防火墙规则能绕过断网保护",
                 "；".join("%s：%s" % p for p in permits)[:300])
             row(self.probes.dns_ok() and self.probes.dns_reachable(), "DNS 解析正常（含不经缓存的直接查询）")
-            out("ℹ️ 局域网 DNS：%s（设置 %s）" % ("拦截" if state.get("dns_block") else "放行", self.cfg["block_lan_dns"]))
-            physical = self.probes.physical_interfaces()
-            for iface in physical:
-                leaked = self.probes.direct_bypass(iface, self.cfg["bypass_probe_targets"][0])
-                row(not leaked, "绑定 %s 直连被拦截" % iface)
-            others = self.probes.exemption_users(state.get("core_gid"), self.cfg["core_names"]) \
-                if state.get("core_gid") else []
-            row(not others, "没有其他程序使用代理内核的放行身份联网", "、".join(others))
+            if state.get("direct"):
+                out("ℹ️ 代理断开时：允许直连（Claude 立即隔离，代理恢复且检查通过后自动解除）")
+                row(bool(state.get("direct_block")), "Claude 其他地址拦截表", "%d 个地址" % len(state.get("direct_block") or {}))
+                check = state.get("direct_check") or {}
+                row(bool(check) and not check.get("moved"), "Claude 主站解析在 Anthropic 网段内",
+                    ("尚未核对" if not check else "、".join(check.get("moved") or []) or
+                     "%s 核对（%s）" % (time.strftime("%m-%d %H:%M", time.localtime(check.get("at", 0))),
+                                     "经代理 DoH" if check.get("via") == "doh" else "系统 DNS")))
+                with util.StateLock():  # the daemon must not reload the table during the test
+                    physical, leaked = self.direct_canary()
+                for iface in physical:
+                    row(iface not in leaked, "绑定 %s 访问拦截表中的地址被拒绝" % iface)
+            else:
+                out("ℹ️ 局域网 DNS：%s（设置 %s）" % ("拦截" if state.get("dns_block") else "放行", self.cfg["block_lan_dns"]))
+                physical = self.probes.physical_interfaces()
+                for iface in physical:
+                    leaked = self.probes.direct_bypass(iface, self.cfg["bypass_probe_targets"][0])
+                    row(not leaked, "绑定 %s 直连被拦截" % iface)
+                others = self.probes.exemption_users(state.get("core_gid"), self.cfg["core_names"]) \
+                    if state.get("core_gid") else []
+                row(not others, "没有其他程序使用代理内核的放行身份联网", "、".join(others))
         if self.cfg["require_claudeguard"]:
             cg = obs.get("claudeguard") or {}
             row(cg.get("installed") and cg.get("fresh"), "ClaudeGuard 正在运行",

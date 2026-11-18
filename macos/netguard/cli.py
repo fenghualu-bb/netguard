@@ -9,7 +9,7 @@ from . import VERSION, config, events, paths, util
 from .service import Service, UserError
 
 ROOT_COMMANDS = {"enable", "disable", "release", "guard-on", "guard-off", "isolate", "unisolate",
-                 "recover", "watch", "verify", "refresh", "whitelist", "drill"}
+                 "recover", "watch", "verify", "refresh", "whitelist", "drill", "proxy-down", "cleanup"}
 
 
 def _is_root():
@@ -56,6 +56,19 @@ def print_status(status, out=print):
         {"global": "全局", "rule": "规则", "direct": "直连"}.get(fl.get("mode"), "待核实")))
     out("  局域网 DNS：%s   真实 IP 模式：%s" % ("拦截" if status.get("dns_block") else "放行",
                                             "是" if status.get("realip") else "否"))
+    if status.get("direct"):
+        check = status.get("direct_check") or {}
+        out("  代理断开时：允许直连（Claude 立即隔离）   拦截表：%s 个地址   主站网段核对：%s" % (
+            status.get("direct_block"), "未核对" if not check else ("✗ " + "、".join(check["moved"]))
+            if check.get("moved") else "✓"))
+    else:
+        out("  代理断开时：整机断网（只剩局域网）")
+    cl = status.get("claude") or {}
+    last = cl.get("last_cleanup") or {}
+    out("  Claude 进程：%s 个（桌面版%s）   退出后清理：%s%s" % (
+        cl.get("count", "?"), "运行中" if cl.get("main_running") else "未运行",
+        {"full": "残留和单独运行的 Claude Code", "desktop": "仅桌面版残留", "off": "关"}.get(cl.get("policy"), "?"),
+        "   上次清理 %s：%d 个" % (_fmt_time(last.get("at")), len(last.get("cleaned") or [])) if last else ""))
     if status.get("require_claudeguard"):
         out("  ClaudeGuard：%s  保护%s  网络助手%s  claude 钩子%s" % (
             ("运行中（%s）" % cg.get("state")) if cg.get("fresh") else "未运行或状态过期",
@@ -87,6 +100,10 @@ def main(argv=None):
     sub.add_parser("recover", help="紧急恢复：移除 NetGuard 的全部 pf 规则并关闭断网保护")
     sub.add_parser("drill", help="自动断线演练：退出 FlClash→验证直连被拦与锁定→重新打开；3 分钟未恢复自动急救")
     sub.add_parser("watch", help="（后台）常驻检查循环")
+    sub.add_parser("proxy-down", help="代理断开时：block=整机断网，direct=允许直连且立即隔离 Claude"
+                   ).add_argument("policy", choices=["block", "direct"])
+    sub.add_parser("cleanup", help="Claude 退出后清理残留：full=含单独运行的 Claude Code，desktop=仅桌面版，off=关"
+                   ).add_argument("policy", choices=["full", "desktop", "off"])
     ev = sub.add_parser("events", help="显示保护记录")
     ev.add_argument("-n", type=int, default=30)
     wl = sub.add_parser("whitelist", help="白名单")
@@ -173,7 +190,13 @@ def main(argv=None):
             if args.op in ("add", "remove") and not args.value:
                 raise UserError("请给出 IP 或网段")
             svc.whitelist(args.op, args.value)
+        elif command == "proxy-down":
+            svc.set_proxy_down(args.policy)
+        elif command == "cleanup":
+            svc.set_cleanup(args.policy)
         elif command == "drill":
+            if svc.read_state().get("direct"):
+                raise UserError("断线演练用于“整机断网”模式；直连模式请按 ACCEPTANCE.md 的直连模式验收项手动验证。")
             from .drill import Drill
             result = Drill(svc).run()
             print("—— 断线演练结果 ——")

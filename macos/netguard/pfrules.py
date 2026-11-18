@@ -26,18 +26,27 @@ class PFError(RuntimeError):
 # While Claude is isolated, the daemon fills this anchor table with the fake-ip answers
 # (inside the TUN range) that FlClash gives for Claude's domains.
 CLAUDE_TABLE = "ng_claude"
+# Direct mode: real addresses of Claude's other hosts (assets/CDN) outside Anthropic's ranges.
+DIRECT_TABLE = "ng_direct"
+# The label that proves which rule set is loaded.
+MARKER = {False: "ng_block_all", True: "ng_direct"}
 
 
 def _list(values):
     return "{ " + ", ".join(values) + " }"
 
 
-def render(cfg, core_uid, core_gid, dns_block=None, isolate=False):
+def render(cfg, core_uid, core_gid, dns_block=None, isolate=False, direct=False, direct_block=()):
     """Anchor text. core_uid/core_gid identify the FlClash core's sockets.
 
     dns_block: block DNS outside the TUN including the LAN router (None = config value if it
     is a boolean, else False). isolate: Claude is isolated, so Anthropic's ranges are refused
     on every path, the TUN included.
+
+    direct: "proxy down → direct" mode (proxy_down = "direct"). There is no default block:
+    when the proxy is off, ordinary programs use the real IP. Anthropic's ranges and the
+    addresses in `direct_block` are still refused on every path except the TUN, and the
+    daemon isolates Claude as soon as the proxy is gone.
 
     FlClash authorizes its core for TUN with `chown root:admin; chmod 4750`, so the
     core runs with effective uid 0 and the launching user's group (normally staff=20).
@@ -82,6 +91,21 @@ def render(cfg, core_uid, core_gid, dns_block=None, isolate=False):
     if cfg["anthropic_v6"]:
         lines.append('block return out quick inet6 %sto %s label "ng_anthropic"'
                      % (src6, _list(cfg["anthropic_v6"])))
+    if direct:
+        addresses = sorted(set(str(a) for a in direct_block))
+        lines += [
+            "",
+            "# Claude's other hosts (assets, CDN) outside Anthropic's ranges: refused like them.",
+            "table <%s> persist%s" % (DIRECT_TABLE, (" " + _list(addresses)) if addresses else ""),
+            'block return out quick inet %sto <%s> label "ng_direct_block"' % (src4, DIRECT_TABLE),
+            'block return out quick inet6 %sto <%s> label "ng_direct_block"' % (src6, DIRECT_TABLE),
+            "",
+            "# Proxy down → direct: everything else may use the real IP (the user's choice).",
+            "# Claude is isolated by the daemon whenever the proxy is not carrying traffic.",
+            'pass out all keep state label "ng_direct"',
+            "",
+        ]
+        return "\n".join(lines)
     lines += [
         "",
         "# Default: no outbound traffic. Later permits override this (last match wins).",
@@ -208,20 +232,21 @@ class PF:
             names.append(name if name.startswith(parent + "/") else parent + "/" + name)
         return sorted(names)
 
-    def foreign_permits(self):
+    def foreign_permits(self, direct=False):
         """Other pf rules that can override NetGuard's block (read-only).
 
         pf evaluates the main ruleset in order and expands `anchor "com.apple/*"` in name
         order, so zz.NetGuard comes last among Apple's anchors. A rule can defeat it if it
         is a `pass ... quick` evaluated before it, or any `pass` evaluated after it (last
         match wins). Inbound-only rules and loopback/AirDrop interfaces cannot carry Claude's
-        traffic out and are ignored. Returns [(anchor or "main", rule)].
+        traffic out and are ignored. In direct mode every NetGuard block is `quick`, so only
+        quick permits before it matter. Returns [(anchor or "main", rule)].
         """
         found = []
         after = [False]
 
         def judge(where, rule):
-            if foreign_permit(rule, after[0]):
+            if foreign_permit(rule, after[0] and not direct):
                 found.append((where, rule))
 
         def walk(name, depth):
@@ -273,6 +298,20 @@ class PF:
     def drop_claude_table(self):
         self._pf("-a", paths.ANCHOR, "-t", CLAUDE_TABLE, "-T", "kill", check=False)
 
+    def direct_table(self):
+        out = self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "show", check=False).stdout
+        return sorted(line.strip() for line in (out or "").splitlines() if line.strip())
+
+    def direct_table_add(self, address):
+        """Temporarily add one address (the self-test canary); rules and fingerprint unchanged."""
+        self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "add", address)
+
+    def drop_direct_table(self):
+        self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "kill", check=False)
+
+    def direct_table_delete(self, address):
+        self._pf("-a", paths.ANCHOR, "-t", DIRECT_TABLE, "-T", "delete", address, check=False)
+
     def load(self, text):
         self.check_syntax(text)
         self._pf("-a", paths.ANCHOR, "-f", "-", input=text)
@@ -295,7 +334,9 @@ class PF:
         if token and token_in_references(token, self.references()):
             self._pf("-X", token, check=False)
 
-    def integrity(self, expected_fp):
+    def integrity(self, expected_fp, direct=False, direct_block=None):
+        """direct_block: in direct mode the table contents must match too (pfctl -sr does not
+        print table contents, so the fingerprint alone would miss a flushed table)."""
         out = {"pf_enabled": False, "main_anchor_ref": False, "rules_match": False,
                "rule_count": 0, "error": None, "read_error": None}
         try:
@@ -304,7 +345,9 @@ class PF:
             rules = self.anchor_rules()
             out["rule_count"] = len(normalize_rules(rules).splitlines())
             out["rules_match"] = bool(expected_fp) and fingerprint(rules) == expected_fp \
-                and "ng_block_all" in rules
+                and MARKER[bool(direct)] in rules
+            if direct and direct_block is not None and out["rules_match"]:
+                out["rules_match"] = self.direct_table() == sorted(set(direct_block))
         except PFError as exc:
             out["read_error"] = str(exc)
         out["complete"] = bool(out["pf_enabled"] and out["main_anchor_ref"] and out["rules_match"])

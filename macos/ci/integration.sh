@@ -185,6 +185,38 @@ if [ -n "$GW" ]; then
     probe_case "局域网 DNS 被拦（dns_block）" - ng_dns runner -c "$GW" 53
 fi
 
+echo "  -- 变体：代理断开时允许直连（proxy_down=direct）"
+# 1.0.0.1 stands in for one of Claude's asset/CDN addresses in the ng_direct table.
+py "
+from netguard import config, pfrules
+pfrules.PF().load(pfrules.render(config.validate({}), 0, $GID, direct=True, direct_block=['1.0.0.1']))"
+check "直连模式规则已加载" bash -c "/sbin/pfctl -a '$ANCHOR' -sr | grep -q 'label \"ng_direct\"'"
+check "直连模式没有整机拦截规则" bash -c "! /sbin/pfctl -a '$ANCHOR' -sr | grep -q ng_block_all"
+check "拦截表已随规则加载" bash -c "/sbin/pfctl -a '$ANCHOR' -t ng_direct -T show | grep -q 1.0.0.1"
+probe_case "直连模式：普通用户直连公网放行（代理断开时浏览器可用）" OK ng_direct runner 1.1.1.1 443 5000
+probe_case "直连模式：普通用户直连 Anthropic 网段仍被拦" FAIL ng_anthropic runner 160.79.104.10 443 3000
+probe_case "直连模式：root 直连 Anthropic 网段也被拦" FAIL ng_anthropic root 160.79.104.10 443 3000
+probe_case "直连模式：直连 Claude 其他地址（拦截表）被拦" FAIL ng_direct_block runner 1.0.0.1 443 3000
+if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
+    probe_case "直连模式：经 TUN 去拦截表地址放行" - ng_direct runner -b 198.18.0.1 1.0.0.1 443 1500
+    /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null
+fi
+py "
+from netguard import pfrules
+pf = pfrules.PF(); pf.direct_table_add('1.1.1.1')"
+probe_case "直连模式：临时加入拦截表的自检地址立即被拦" FAIL ng_direct_block runner 1.1.1.1 443 3000
+py "
+from netguard import pfrules
+pf = pfrules.PF(); pf.direct_table_delete('1.1.1.1')"
+probe_case "直连模式：自检地址移除后恢复直连" OK ng_direct runner 1.1.1.1 443 5000
+py "
+from netguard import config, pfrules
+pfrules.PF().load(pfrules.render(config.validate({}), 0, $GID, isolate=True, direct=True, direct_block=['1.0.0.1']))"
+if /sbin/ifconfig lo0 alias 198.18.0.1/32 2>/dev/null; then
+    probe_case "直连模式隔离时：经 TUN 去拦截表地址也被拦" FAIL ng_direct_block runner -b 198.18.0.1 1.0.0.1 443 1500
+    /sbin/ifconfig lo0 -alias 198.18.0.1 2>/dev/null
+fi
+
 echo "  -- 放行身份被其他程序使用的检测（lsof）"
 sudo -u "$RUNNER" "$WORK/prober-core" 10.255.255.1 9 8000 >/dev/null 2>&1 &
 BG=$!
