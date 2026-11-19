@@ -438,6 +438,8 @@ class Probes:
         info["helper_loaded"] = self.runner([paths.LAUNCHCTL, "print", "system/com.claudeguard.helper"],
                                             timeout=10).returncode == 0
         cfg = util.read_json(os.path.join(home, ".config", "claudeguard", "config.json"), {}) or {}
+        # ClaudeGuard v2 has a second "proxy" mode with its own sing-box tunnel; v1 has no key.
+        info["mode"] = cfg.get("connection_mode", "vpn") if isinstance(cfg, dict) else None
         info.update(judge_claude_paths(cfg if isinstance(cfg, dict) else {}, home))
         return info
 

@@ -480,7 +480,7 @@ class Service:
                     "（pf 主规则集缺少 com.apple/* 锚点，可能开启了“互联网共享”）"
                     if integ.get("pf_enabled") and not integ.get("main_anchor_ref") else "")))
             if integ.get("complete"):
-                permits = self.foreign_permits(direct=bool(state.get("direct")))
+                permits = self.foreign_permits(direct=bool(state.get("direct")), tunnel=tun)
                 obs["foreign_permits"] = ["%s：%s" % p for p in permits]
                 if permits:
                     f.append(events.finding("pf_bypass", "其他防火墙规则可能绕过断网保护（共 %d 条，第一条在 %s：%s）"
@@ -491,6 +491,9 @@ class Service:
             if not cg["installed"] or not cg["fresh"]:
                 f.append(events.finding("guard_daemon", "ClaudeGuard 未运行或状态过期"))
             else:
+                if cg.get("mode") not in (None, "vpn"):
+                    f.append(events.finding("guard_mode", "ClaudeGuard 处于%s模式，请切回 VPN 模式" % (
+                        "代理" if cg.get("mode") == "proxy" else str(cg.get("mode"))[:20])))
                 if cg.get("protection_enabled") is False:
                     f.append(events.finding("guard_off", "ClaudeGuard 的保护被关闭"))
                 if cg.get("error"):
@@ -513,9 +516,9 @@ class Service:
                     f.append(events.finding("claude_path", "；".join(broken)))
         return f, obs
 
-    def foreign_permits(self, direct=False):
+    def foreign_permits(self, direct=False, tunnel=None):
         try:
-            return self.pf.foreign_permits(direct=direct)
+            return self.pf.foreign_permits(direct=direct, tunnel=tunnel)
         except pfrules.PFError:
             return []  # a failed read is not proof of a bypass
 
@@ -1190,7 +1193,7 @@ class Service:
             row(integ["complete"], "pf 规则完整", "pf=%s 锚点引用=%s 规则=%s 条" % (
                 integ["pf_enabled"], integ["main_anchor_ref"], integ["rule_count"]))
             row(integ.get("token_live", False), "pf 启用引用（token）有效")
-            permits = self.foreign_permits(direct=bool(state.get("direct")))
+            permits = self.foreign_permits(direct=bool(state.get("direct")), tunnel=obs.get("tun"))
             row(not permits, "没有其他防火墙规则能绕过断网保护",
                 "；".join("%s：%s" % p for p in permits)[:300])
             row(self.probes.dns_ok() and self.probes.dns_reachable(), "DNS 解析正常（含不经缓存的直接查询）")

@@ -172,15 +172,21 @@ def _anchor_name(rule):
     return match.group(1) if match else None
 
 
-def foreign_permit(rule, after_netguard):
-    """True if this pf rule (from `pfctl -sr`) could let outbound traffic past NetGuard."""
+def foreign_permit(rule, after_netguard, tunnel=None):
+    """True if this pf rule (from `pfctl -sr`) could let outbound traffic past NetGuard.
+
+    `tunnel`: the proxy TUN interface (e.g. utun4). A permit bound to it only lets traffic
+    into the proxy tunnel, which NetGuard allows anyway. ClaudeGuard v2 loads exactly such a
+    rule while the exit is whitelisted (`pass out quick on utun4 ... to <claude_guard>`).
+    `on ! utun4` (every interface except the tunnel) is a real bypass and stays reported.
+    """
     words = rule.split()
     if not words or words[0] != "pass":
         return False
     if len(words) > 1 and words[1] == "in":
         return False
     for i, word in enumerate(words[:-1]):
-        if word == "on" and words[i + 1] in _IGNORED_IFACES:
+        if word == "on" and (words[i + 1] in _IGNORED_IFACES or (tunnel and words[i + 1] == tunnel)):
             return False
     return after_netguard or "quick" in words
 
@@ -232,7 +238,7 @@ class PF:
             names.append(name if name.startswith(parent + "/") else parent + "/" + name)
         return sorted(names)
 
-    def foreign_permits(self, direct=False):
+    def foreign_permits(self, direct=False, tunnel=None):
         """Other pf rules that can override NetGuard's block (read-only).
 
         pf evaluates the main ruleset in order and expands `anchor "com.apple/*"` in name
@@ -246,7 +252,7 @@ class PF:
         after = [False]
 
         def judge(where, rule):
-            if foreign_permit(rule, after[0] and not direct):
+            if foreign_permit(rule, after[0] and not direct, tunnel=tunnel):
                 found.append((where, rule))
 
         def walk(name, depth):
