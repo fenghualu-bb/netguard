@@ -101,15 +101,49 @@ class Probes:
     def process_args(self):
         return parse_ps_args(self.runner([paths.PS, "-axww", "-o", "pid=,args="]).stdout)
 
+    FLCLASH_APP = "/Applications/FlClash.app/Contents/"
+
     def find_core(self):
+        """FlClash's core by name; if a FlClash update renamed it, any root program inside
+        FlClash.app other than the UI (only privileged ones can carry the kill-switch permit)."""
         names = set(self.cfg["core_names"])
+        rows = self.processes()
         cores = []
-        for row in self.processes():
+        for row in rows:
             if os.path.basename(row["comm"]) in names:
                 row = dict(row)
                 row["privileged"] = row["uid"] == 0 and row["gid"] != 0
                 cores.append(row)
+        if not cores:
+            for row in rows:
+                path = row.get("path") or row["comm"]
+                if path.startswith(self.FLCLASH_APP) and os.path.basename(path) != "FlClash" and \
+                        row["uid"] == 0 and row["gid"] != 0:
+                    cores.append(dict(row, privileged=True, renamed=True))
         return cores
+
+    def flclash_version(self):
+        import plistlib
+        try:
+            with open(self.FLCLASH_APP + "Info.plist", "rb") as stream:
+                return str(plistlib.load(stream).get("CFBundleShortVersionString") or "") or None
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            return None
+
+    def other_tunnels(self):
+        """Up utun interfaces with an IPv4 address outside the configured TUN range."""
+        net = ipaddress.ip_network(self.cfg["tun_v4"])
+        out = []
+        for name, info in sorted(self.interfaces().items()):
+            if not name.startswith("utun") or "UP" not in info["flags"]:
+                continue
+            for addr in info["inet"]:
+                try:
+                    if ipaddress.ip_address(addr) not in net:
+                        out.append((name, addr))
+                except ValueError:
+                    continue
+        return out
 
     # ---- interfaces ----
     def interfaces(self):
@@ -150,38 +184,46 @@ class Probes:
         return parse_trace(result.stdout) if result.returncode == 0 else None
 
     def isolated_proxy(self):
-        """Find a SOCKS listener owned by the authorized FlClash core, or fail closed.
+        proxies = self.isolated_proxies()
+        return proxies[0] if proxies else None
+
+    def isolated_proxies(self):
+        """SOCKS listeners owned by the authorized FlClash core ([] = fail closed).
 
         Never trust a port from the desktop user's YAML without checking its actual
         listener. Only loopback is used; no system proxy or firewall setting changes.
         """
         fl = self.flclash_config()
         if fl.get("source") != "config.yaml" or not fl.get("path"):
-            return None
+            return []
         try:
             with open(fl["path"], encoding="utf-8-sig") as stream:
                 text = stream.read(400_000)
         except (OSError, UnicodeError):
-            return None
+            return []
         ports = []
         for key in ("mixed-port", "socks-port"):
             values = re.findall(r"^" + key + r":([^\n]*)$", text, re.M)
             if len(values) > 1:
-                return None
+                return []
             if not values:
                 continue
             value = re.fullmatch(r"\s*(?:([0-9]+)|'([0-9]+)'|\"([0-9]+)\")\s*(?:#.*)?", values[0])
             if value is None:
-                return None
+                return []
             port = int(next(v for v in value.groups() if v is not None))
             if port == 0:
                 continue
             if not 1 <= port <= 65535:
-                return None
+                return []
             ports.append(port)
         cores = {c["pid"] for c in self.find_core() if c.get("privileged")}
         if not cores:
-            return None
+            return []
+        if not ports:
+            # FlClash 0.9.4 replaces a mixed port of 0 at run time, so the file may not name it.
+            ports = self.core_loopback_ports(cores)
+        verified = []
         for port in ports:
             result = self.runner(["/usr/sbin/lsof", "-nP", "-a", "-iTCP:%d" % port,
                                   "-sTCP:LISTEN", "-Fpu"], timeout=10)
@@ -195,8 +237,19 @@ class Probes:
                 elif re.fullmatch(r"u[0-9]+", line) and current is not None:
                     owners[current] = int(line[1:])
             if owners and all(pid in cores and uid == 0 for pid, uid in owners.items()):
-                return "127.0.0.1:%d" % port
-        return None
+                verified.append("127.0.0.1:%d" % port)
+        return verified
+
+    def core_loopback_ports(self, pids):
+        """TCP ports the authorized core itself listens on, on loopback or all addresses."""
+        result = self.runner(["/usr/sbin/lsof", "-nP", "-a", "-p", ",".join(str(p) for p in sorted(pids)),
+                              "-iTCP", "-sTCP:LISTEN", "-Fpn"], timeout=10)
+        ports = set()
+        for line in (result.stdout or "").splitlines() if result.returncode == 0 else []:
+            match = re.fullmatch(r"n(127\.0\.0\.1|\*|localhost|\[::1\]):([0-9]{1,5})", line)
+            if match and 1 <= int(match.group(2)) <= 65535:
+                ports.add(int(match.group(2)))
+        return sorted(ports)
 
     def claude_egress(self, url, isolated=False, max_time=8):
         """Check the same HTTPS endpoint without lifting Claude's isolation first.
@@ -207,12 +260,13 @@ class Probes:
         """
         if not isolated:
             return self.egress(url, max_time=max_time)
-        proxy = self.isolated_proxy()
-        if proxy is None:
-            return None
-        result = self.runner([paths.CURL, "-q", "-s", "--socks5-hostname", proxy,
-                              "--noproxy", "", "--max-time", str(max_time), url], timeout=max_time + 4)
-        return parse_trace(result.stdout) if result.returncode == 0 else None
+        for proxy in self.isolated_proxies()[:4]:  # e.g. the mixed port and the controller port
+            result = self.runner([paths.CURL, "-q", "-s", "--socks5-hostname", proxy,
+                                  "--noproxy", "", "--max-time", str(max_time), url], timeout=max_time + 4)
+            ip = parse_trace(result.stdout) if result.returncode == 0 else None
+            if ip:
+                return ip
+        return None
 
     def direct_bypass(self, interface, target):
         """True if a connection pinned to a physical interface SUCCEEDS (= kill switch broken).

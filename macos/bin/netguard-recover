@@ -36,6 +36,7 @@ if [ -d "$ROOT" ]; then
   "direct_block": {},
   "direct_check": null,
   "dns_block": false,
+  "flclash_authorized_version": null,
   "killswitch": false,
   "pending": null,
   "rules_fp": null

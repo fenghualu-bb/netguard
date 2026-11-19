@@ -169,6 +169,12 @@ class FakeProbes:
         self.fake_ips = ["198.18.0.58", "198.18.0.79"]
         self.resolve_calls = 0
 
+    def flclash_version(self):
+        return getattr(self, "fl_version", "0.9.3")
+
+    def other_tunnels(self):
+        return list(getattr(self, "tunnels", []))
+
     def resolve_public(self, domains, via="doh"):
         self.resolve_public_calls = getattr(self, "resolve_public_calls", []) + [via]
         answers = getattr(self, "public_answers", None)

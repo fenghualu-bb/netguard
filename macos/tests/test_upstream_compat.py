@@ -72,6 +72,52 @@ class ClaudeGuardModeTests(unittest.TestCase):
             self.assertEqual(svc.read_guard()["last_findings"], [], mode)
 
 
+class FlClashUpdateTests(unittest.TestCase):
+    def test_update_that_drops_the_authorization_is_explained(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        svc.enable(out=lambda *_: None)
+        svc.tick()
+        self.assertEqual(svc.read_state()["flclash_authorized_version"], "0.9.3")
+        pr.fl_version = "0.9.4"
+        pr.cores = [dict(pr.cores[0], uid=501, privileged=False)]  # the update replaced the setuid core
+        clock.advance(10)
+        svc.tick()
+        findings = svc.read_guard()["last_findings"]
+        self.assertTrue(any("从 0.9.3 更新到 0.9.4" in f and "重新开启 TUN" in f for f in findings), findings)
+        self.assertTrue(any("需要重新授权" in t for t, _ in notes))
+        pr.cores = [dict(pr.cores[0], uid=0, privileged=True)]  # re-authorized
+        clock.advance(10)
+        svc.tick()
+        self.assertEqual(svc.read_state()["flclash_authorized_version"], "0.9.4")
+        self.assertFalse(any("更新到" in f for f in svc.read_guard()["last_findings"]))
+
+    def test_moved_tun_address_is_pointed_out(self):
+        svc, pf, pr, clock, kills, notes = make_service(self)
+        pr.tun = None
+        pr.tunnels = [("utun6", "172.19.0.1")]
+        svc.tick()
+        self.assertTrue(any("utun6 172.19.0.1" in f and "tun_v4" in f for f in svc.read_guard()["last_findings"]))
+
+
+class FlClashCoreDiscoveryTests(unittest.TestCase):
+    def rows(self, *rows):
+        from netguard import config, probes as probes_mod
+        p = probes_mod.Probes(config.validate({}))
+        p.processes = lambda: [dict(pid=pid, uid=uid, gid=gid, path=path, comm=path) for pid, uid, gid, path in rows]
+        return p.find_core()
+
+    def test_renamed_core_inside_flclash_app_is_found(self):
+        cores = self.rows((10, 501, 20, "/Applications/FlClash.app/Contents/MacOS/FlClash"),
+                          (11, 0, 20, "/Applications/FlClash.app/Contents/MacOS/MihomoCore"))
+        self.assertEqual([(c["pid"], c["privileged"], c.get("renamed")) for c in cores], [(11, True, True)])
+
+    def test_named_core_wins_and_unprivileged_helpers_are_not_cores(self):
+        cores = self.rows((11, 0, 20, "/Applications/FlClash.app/Contents/MacOS/FlClashCore"),
+                          (12, 0, 0, "/Applications/FlClash.app/Contents/MacOS/HelperService"))
+        self.assertEqual([c["pid"] for c in cores], [11])
+        self.assertEqual(self.rows((12, 0, 0, "/Applications/FlClash.app/Contents/MacOS/HelperService")), [])
+
+
 @unittest.skipUnless(CG_SRC, "set CG_SRC to a ClaudeGuard checkout")
 class ClaudeGuardSourceTests(unittest.TestCase):
     """Run against the actual upstream source tree."""

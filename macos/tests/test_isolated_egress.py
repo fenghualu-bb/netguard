@@ -76,7 +76,9 @@ class IsolatedProbeTests(unittest.TestCase):
                 self.write(yaml)
                 self.calls.clear()
                 self.assertIsNone(self.probe.claude_egress('https://claude.ai/', isolated=True))
-                self.assertEqual(self.calls, [])
+                # At most a read-only lsof of the core's own listeners; never a request.
+                self.assertFalse(any(c[0] == paths.CURL for c in self.calls))
+                self.assertTrue(all(c[0] == '/usr/sbin/lsof' for c in self.calls))
 
     def test_socks_only_config_and_quoted_port(self):
         self.write('mixed-port: 0\nsocks-port: "7891" # local\n')
@@ -169,3 +171,35 @@ class IsolationReleaseRegressionTests(unittest.TestCase):
         svc.unisolate(out=lambda *_: None)
         self.assertFalse(svc.read_state()['claude_block'])
         self.assertFalse(pf.table)
+
+
+class CorePortDiscoveryTests(unittest.TestCase):
+    """FlClash 0.9.4 may leave mixed-port: 0 in the file and pick the port at run time."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, 'config.yaml')
+        with open(self.path, 'w') as stream:
+            stream.write('mixed-port: 0\n')
+        self.calls = []
+        self.probe = Probes(config.validate({}), runner=self.run_fake)
+        self.probe.flclash_config = lambda: {'source': 'config.yaml', 'path': self.path}
+        self.probe.find_core = lambda: [{'pid': 50, 'uid': 0, 'gid': 20, 'privileged': True}]
+
+    def run_fake(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[0] == '/usr/sbin/lsof' and '-p' in argv:  # the core's own listeners
+            return subprocess.CompletedProcess(argv, 0, 'p50\nn127.0.0.1:9090\nn127.0.0.1:7890\nn192.168.1.5:8000\n', '')
+        if argv[0] == '/usr/sbin/lsof':  # owner of one port
+            return subprocess.CompletedProcess(argv, 0, 'p50\nu0\n', '')
+        proxy = argv[argv.index('--socks5-hostname') + 1]
+        ok = proxy.endswith(':7890')  # 9090 is the controller API, not SOCKS
+        return subprocess.CompletedProcess(argv, 0 if ok else 97, 'ip=203.0.113.10\n' if ok else '', '')
+
+    def test_discovers_the_core_port_and_skips_non_socks_ones(self):
+        self.assertEqual(self.probe.claude_egress('https://claude.ai/cdn-cgi/trace', isolated=True), '203.0.113.10')
+        tried = [c[c.index('--socks5-hostname') + 1] for c in self.calls if c[0] == paths.CURL]
+        self.assertEqual(tried, ['127.0.0.1:7890'])  # sorted: 7890 before 9090; LAN address ignored
+        self.assertFalse(any('192.168.1.5' in ' '.join(c) for c in self.calls if c[0] == paths.CURL))
+

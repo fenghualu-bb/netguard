@@ -45,7 +45,7 @@ DNS_PROBLEM = "DNS 解析失败"
 
 STATE_DEFAULTS = {"killswitch": False, "claude_block": False, "core_uid": 0, "core_gid": None,
                   "rules_fp": None, "pending": None, "dns_block": False,
-                  "direct": False, "direct_block": {}, "direct_check": None}
+                  "direct": False, "direct_block": {}, "direct_check": None, "flclash_authorized_version": None}
 GUARD_DEFAULTS = {"enabled": True, "lockdown": False, "since": 0, "reasons": [], "reason_codes": [], "bad_streak": 0,
                   "last_check": 0, "last_findings": [], "triggers": 0, "grace_until": 0,
                   "grace_noted": 0, "observations": {}}
@@ -453,14 +453,27 @@ class Service:
         cores = self.probes.find_core()
         obs["core"] = {"running": bool(cores), "privileged": any(c["privileged"] for c in cores),
                        "uid": cores[0]["uid"] if cores else None, "gid": cores[0]["gid"] if cores else None}
+        version = self.probes.flclash_version()
+        obs["flclash_version"] = version
+        obs["core"]["renamed"] = any(c.get("renamed") for c in cores)
+        # A FlClash update replaces the setuid core, so its TUN authorization is lost.
+        reauth = bool(version and state.get("flclash_authorized_version")
+                      and version != state.get("flclash_authorized_version"))
+        obs["flclash_reauth"] = reauth and not obs["core"]["privileged"]
         if not cores:
             f.append(events.finding("core", "FlClash 内核未运行"))
         elif not obs["core"]["privileged"]:
-            f.append(events.finding("core", "FlClash 内核未获授权（TUN 未开启），断网保护会拦住它的流量"))
+            f.append(events.finding("core", "FlClash 内核未获授权（TUN 未开启），断网保护会拦住它的流量" + (
+                "。FlClash 刚从 %s 更新到 %s，请在 FlClash 里重新开启 TUN 并按提示输入密码授权内核"
+                % (state.get("flclash_authorized_version"), version) if reauth else "")))
         if direct_down:
             pass  # reported once as proxy_down above
         elif not tun:
-            f.append(events.finding("tun", "TUN 虚拟网卡未连接"))
+            others = self.probes.other_tunnels()
+            obs["other_tunnels"] = ["%s %s" % t for t in others]
+            f.append(events.finding("tun", "TUN 虚拟网卡未连接" + (
+                "（发现 %s 不在配置的 %s 内：FlClash 可能改了 TUN 地址，请核对 FlClash 的 TUN 设置或 config.json 的 tun_v4）"
+                % ("、".join("%s %s" % t for t in others[:3]), cfg["tun_v4"]) if others else "")))
         elif route and route != tun:
             f.append(events.finding("tun", "TUN 已连接，但公网流量没有经过它（路由指向 %s）" % route))
         obs["flclash_ui"] = self.probes.flclash_ui()
@@ -570,6 +583,18 @@ class Service:
                     key="dns-relaxed", every=3600)
         return True
 
+    def track_flclash(self, state, obs):
+        """Remember the FlClash version whose core was authorized; say so when an update undid it."""
+        version = obs.get("flclash_version")
+        if (obs.get("core") or {}).get("privileged") and version and \
+                state.get("flclash_authorized_version") != version:
+            state["flclash_authorized_version"] = version
+            self.write_state(state)
+        if obs.get("flclash_reauth"):
+            self.notify("NetGuard：FlClash 更新后需要重新授权",
+                        "FlClash 已更新到 %s，内核的 TUN 授权随更新失效。请打开 FlClash，重新开启 TUN 并输入密码。" % version,
+                        key="flclash-reauth", every=3600)
+
     def check_exemption(self, state, obs):
         # In direct mode there is no default block, hence no proxy-core exemption to share.
         if not state.get("killswitch") or not state.get("core_gid") or state.get("direct"):
@@ -607,6 +632,7 @@ class Service:
             if self.dns_safety_valve(state, obs):
                 integ = self.ensure_rules(state)
             self.direct_housekeeping(state, obs)
+            self.track_flclash(state, obs)
             self.check_exemption(state, obs)
             obs["dns_block"] = bool(state.get("dns_block"))
             guard["last_check"] = int(self.clock())
