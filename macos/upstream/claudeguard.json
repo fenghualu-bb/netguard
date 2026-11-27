@@ -1,6 +1,10 @@
 {
-  "kind": "source",
-  "version": "61b61e1",
-  "note": "ClaudeGuard v1 installed from source; the updater keeps it. The daily upstream workflow replaces this file through a pull request once a newer release passes NetGuard's compatibility tests.",
-  "verified_at": "2026-11-17"
+  "kind": "pkg",
+  "version": "2.2",
+  "url": "https://github.com/fenghualu-bb/netguard/releases/download/claudeguard-2.2/ClaudeGuard.pkg",
+  "sha256": "e51cfaab4be98ee5b0cf827ba7622d96a15bfabc87a2e1dfec5a044d29afd03a",
+  "source_url": "https://github.com/fenghualu-bb/netguard/releases/download/claudeguard-2.2/ClaudeGuard-2.2-source.tar.gz",
+  "upstream_tag": "v2.2",
+  "verified_at": "2026-11-27",
+  "note": "Verified by the upstream workflow; installed by the Mac's updater after this file reaches main."
 }
