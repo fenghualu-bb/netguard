@@ -102,6 +102,8 @@ def main(argv=None):
     sub.add_parser("watch", help="（后台）常驻检查循环")
     sub.add_parser("proxy-down", help="代理断开时：block=整机断网，direct=允许直连且立即隔离 Claude"
                    ).add_argument("policy", choices=["block", "direct"])
+    sub.add_parser("update", help="自动更新：status=查看，check=按规则检查并安装，now=不等 24 小时（CI 仍须通过），enable/disable"
+                   ).add_argument("op", choices=["status", "check", "now", "enable", "disable"])
     sub.add_parser("cleanup", help="Claude 退出后清理残留：full=含单独运行的 Claude Code，desktop=仅桌面版，off=关"
                    ).add_argument("policy", choices=["full", "desktop", "off"])
     ev = sub.add_parser("events", help="显示保护记录")
@@ -114,6 +116,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     command = args.command or "status"
 
+    if command == "update":
+        from . import updater
+        return updater.main([args.op])
     if command == "version":
         print(VERSION)
         return 0

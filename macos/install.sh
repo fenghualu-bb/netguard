@@ -71,6 +71,11 @@ if [ -d "$ROOT/lib" ]; then
     for f in config.json state.json; do
         if [ -f "$ROOT/$f" ]; then cp -p "$ROOT/$f" "$ROOT/backup-$STAMP/$f"; fi
     done
+    # The automatic updater restores this backup (app included) if the new version fails its check.
+    if [ -d "$APP" ]; then /usr/bin/ditto "$APP" "$ROOT/backup-$STAMP/NetGuard.app" 2>/dev/null || true; fi
+    printf '%s\n' "$ROOT/backup-$STAMP" > "$ROOT/last-backup"
+    # Keep the five newest backups.
+    ls -1d "$ROOT"/backup-* 2>/dev/null | sort | sed -e :a -e '$d;N;2,5ba' -e 'P;D' | while IFS= read -r old; do rm -rf "$old"; done
     say "旧版本已备份到 $ROOT/backup-$STAMP"
 fi
 
@@ -79,12 +84,16 @@ install -d -o root -g wheel -m 755 "$ROOT" "$ROOT/lib" "$ROOT/bin"
 rm -rf "$ROOT/lib/netguard"
 cp -R "$SRC/netguard" "$ROOT/lib/netguard"
 cp "$SRC/netguard_main.py" "$ROOT/lib/netguard_main.py"
+rm -rf "$ROOT/lib/upstream"
+cp -R "$SRC/upstream" "$ROOT/lib/upstream"
 find "$ROOT/lib" -name '__pycache__' -type d -prune -exec rm -rf {} +
 chown -R root:wheel "$ROOT/lib"
 chmod -R u=rwX,go=rX "$ROOT/lib"
-for f in netguard netguard-boot netguard-recover netguard-gui-update netguard-control; do
+for f in netguard netguard-boot netguard-recover netguard-control netguard-updater; do
     install -o root -g wheel -m 755 "$SRC/bin/$f" "$ROOT/bin/$f"
 done
+# The GUI-only updater was replaced by com.netguard.updater (whole NetGuard, with rollback).
+rm -f "$ROOT/bin/netguard-gui-update" "$ROOT/gui-update-policy.json"
 install -o root -g wheel -m 755 "$SRC/uninstall.sh" "$ROOT/uninstall.sh"
 printf '%s\n' "$PY" > "$ROOT/python-path"
 chown root:wheel "$ROOT/python-path"; chmod 644 "$ROOT/python-path"
@@ -95,7 +104,11 @@ NETGUARD_INSTALL_USER="$USER_NAME" "$ROOT/bin/netguard" init-config
 
 # Where this copy came from, so the app's "update" button can pull and reinstall it.
 REPO="$(cd "$SRC/.." && pwd)"
-COMMIT="$(sudo -u "$USER_NAME" git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+COMMIT="$(sudo -u "$USER_NAME" git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [ -n "${NETGUARD_FROM_UPDATER:-}" ]; then
+    REPO="${NETGUARD_UPDATE_REPO:-github}"
+    COMMIT="${NETGUARD_UPDATE_COMMIT:-unknown}"
+fi
 "$PY" -c 'import json, sys; json.dump({"repo": sys.argv[1], "commit": sys.argv[2], "user": sys.argv[3], "installed_at": sys.argv[4]}, open(sys.argv[5], "w"))' \
     "$REPO" "$COMMIT" "$USER_NAME" "$(date '+%Y-%m-%d %H:%M')" "$ROOT/source.json"
 chown root:wheel "$ROOT/source.json"; chmod 644 "$ROOT/source.json"
@@ -121,8 +134,21 @@ install -o root -g wheel -m 644 "$SRC/launchd/$CONTROL_LABEL.plist" "$CONTROL_PL
 plutil -lint "$CONTROL_PLIST" >/dev/null
 launchctl bootstrap system "$CONTROL_PLIST"
 
-say "初始化保守自动更新：仅界面可自动替换，保护组件变更须完整审核升级"
-"$ROOT/bin/netguard-gui-update" init-policy
+say "注册自动更新 com.netguard.updater（每 6 小时；只装 main 上满 24 小时且 CI 全过的版本，失败自动回滚）"
+UPDATER_LABEL=com.netguard.updater
+UPDATER_PLIST=/Library/LaunchDaemons/$UPDATER_LABEL.plist
+install -o root -g wheel -m 644 "$SRC/launchd/$UPDATER_LABEL.plist" "$UPDATER_PLIST"
+plutil -lint "$UPDATER_PLIST" >/dev/null
+if [ -n "${NETGUARD_FROM_UPDATER:-}" ] && launchctl print "system/$UPDATER_LABEL" >/dev/null 2>&1; then
+    : # started by the updater itself: re-registering would kill it mid-install
+else
+    launchctl bootout "system/$UPDATER_LABEL" 2>/dev/null || true
+    launchctl bootstrap system "$UPDATER_PLIST"
+fi
+if [ ! -f "$ROOT/update-policy.json" ]; then
+    printf '{"enabled": true, "repo": "fenghualu-bb/netguard", "branch": "main", "soak_hours": 24, "claudeguard": true}\n' > "$ROOT/update-policy.json"
+    chown root:wheel "$ROOT/update-policy.json"; chmod 644 "$ROOT/update-policy.json"
+fi
 
 say "安装紧急恢复入口：$RECOVER_CMD"
 install -o root -g wheel -m 755 "$SRC/scripts/recover.command" "$RECOVER_CMD"

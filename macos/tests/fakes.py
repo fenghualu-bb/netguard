@@ -16,7 +16,8 @@ def use_temp_root(testcase):
     root = tmp.name
     for name, file in (("CONFIG", "config.json"), ("STATE", "state.json"), ("GUARD", "guard.json"),
                        ("STATUS", "status.json"), ("EVENTS", "events.jsonl"), ("LOG", "netguard.log"),
-                       ("LOCK", "state.lock"), ("TOKEN", "pf-token"), ("ANCHOR_FILE", "anchor.rules")):
+                       ("LOCK", "state.lock"), ("TOKEN", "pf-token"), ("ANCHOR_FILE", "anchor.rules"),
+                       ("SOURCE", "source.json"), ("CLAUDE_TRACKED", "claude-tracked.json")):
         old = getattr(paths, name)
         setattr(paths, name, os.path.join(root, file))
         testcase.addCleanup(setattr, paths, name, old)

@@ -104,6 +104,27 @@ struct NGClaude: Decodable {
     var last_cleanup: NGCleanup?
 }
 
+struct NGUpdateStep: Decodable {
+    var action: String?
+    var note: String?
+    var commit: String?
+    var version: String?
+}
+
+struct NGUpdateLast: Decodable {
+    var netguard: NGUpdateStep?
+    var claudeguard: NGUpdateStep?
+}
+
+struct NGUpdate: Decodable {
+    var enabled: Bool?
+    var installed: String?
+    var last_check: Double?
+    var soak_hours: Double?
+    var last: NGUpdateLast?
+    var claudeguard_installed: String?
+}
+
 struct NGDirectCheck: Decodable {
     var at: Double?
     var via: String?
@@ -154,9 +175,10 @@ struct NGStatus: Decodable {
     var direct: Bool?
     var directBlock: Double?
     var directCheck: NGDirectCheck?
+    var update: NGUpdate?
 
     enum CodingKeys: String, CodingKey {
-        case version, integrity, observations, whitelist, interval, realip, source, claude, direct
+        case version, integrity, observations, whitelist, interval, realip, source, claude, direct, update
         case proxyDown = "proxy_down"
         case directBlock = "direct_block"
         case directCheck = "direct_check"
@@ -252,7 +274,6 @@ final class Model: ObservableObject {
     @Published var decodeError: String?
     @Published var events: [NGEvent] = []
     @Published var busy = false
-    @Published var guiUpdateMessage = "启动时自动检查；保护组件变更会暂缓更新。"
     private var timer: Timer?
     /// Last cleanup already shown, so a restart of the menu app never replays an old alert.
     private var lastCleanupSeen = UserDefaults.standard.double(forKey: "lastCleanupSeen")
@@ -265,11 +286,6 @@ final class Model: ObservableObject {
     }
 
     func reload() {
-        let updateFile = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/NetGuard/Updates/update-status.json")
-        if let data = try? Data(contentsOf: updateFile),
-           let update = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let message = update["message"] as? String { guiUpdateMessage = message }
         let decoder = JSONDecoder()
         if let data = FileManager.default.contents(atPath: ngRoot + "/status.json") {
             do {
@@ -417,7 +433,24 @@ final class Model: ObservableObject {
         runProcess("/bin/bash", ["/Library/NetGuard/bin/claudeguard-patch"])
     }
 
-    func update() { netguardSafeGUIUpdate(manual: true) }
+    /// Runs the root updater now (CI must still have passed; only the 24-hour wait is skipped).
+    func update() {
+        if confirm("立即检查并更新 NetGuard？", "只会安装 main 上 CI 全部通过的版本（跳过 24 小时等待）。安装后自动自检，失败会自动恢复原版本。") {
+            admin(["update", "now"])
+        }
+    }
+
+    var updateText: String {
+        guard let u = status?.update else { return "自动更新尚未运行" }
+        var parts: [String] = [u.enabled == false ? "已关闭" : "每 6 小时检查一次，只装 main 上满 \(Int(u.soak_hours ?? 24)) 小时且 CI 全过的版本"]
+        if let n = u.last?.netguard {
+            parts.append("上次（\(fmtTime(u.last_check))）：" + (n.note ?? n.action ?? ""))
+        }
+        if let c = u.last?.claudeguard, let note = c.note, c.action != "off" {
+            parts.append("ClaudeGuard：" + note)
+        }
+        return parts.joined(separator: "；")
+    }
 
     func uninstall() {
         if !confirm("卸载 NetGuard？", "会移除断网规则、后台、菜单栏程序和紧急恢复入口，配置与保护记录保留一份副本。卸载后代理断开时可能经真实 IP 联网。") { return }
@@ -1197,8 +1230,14 @@ struct MaintenanceView: View {
                     SettingRow(title: "修复 ClaudeGuard", detail: "Claude 更新后显示“记录过期”时使用：应用兼容补丁，再运行 claudeguard doctor。") {
                         Button("修复") { model.repairClaudeGuard() }
                     }
-                    SettingRow(title: "界面更新", detail: model.guiUpdateMessage + "（只替换界面；保护组件更新需完整升级）") {
-                        Button("检查") { model.update() }
+                    SettingRow(title: "自动更新", detail: model.updateText + "。装好或回滚都会通知你。") {
+                        HStack(spacing: 8) {
+                            Button("立即检查…") { model.update() }
+                            Toggle("", isOn: Binding(get: { s?.update?.enabled != false }, set: { on in
+                                if on { model.admin(["update", "enable"]) }
+                                else if confirm("关闭自动更新？", "关闭后 NetGuard 和 ClaudeGuard 都不再自动更新；上游变化可能让旧版本无法使用。") { model.admin(["update", "disable"]) }
+                            })).labelsHidden().toggleStyle(.switch)
+                        }
                     }
                     SettingRow(title: "安装来源", detail: "\(s?.source?.repo ?? "未记录") @ \(s?.source?.commit ?? "?")，\(s?.source?.installed_at ?? "?") 安装") {
                         Button("打开目录") { NSWorkspace.shared.open(URL(fileURLWithPath: ngRoot)) }
@@ -1255,7 +1294,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var refresh: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        netguardSafeGUIUpdate()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
         menu.delegate = self
@@ -1351,37 +1389,3 @@ struct NetGuardMain {
     }
 }
 
-
-// NETGUARD_SAFE_GUI_UPDATE_V1 — root-owned helper never replaces the guard.
-func netguardSafeGUIUpdate(manual: Bool = false) {
-    DispatchQueue.global().async {
-        let helper = "/Library/NetGuard/bin/netguard-gui-update"
-        func run(_ exe: String, _ args: [String]) -> (Bool, String) {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
-            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-            do {
-                try p.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-                return (p.terminationStatus == 0, String(data: data, encoding: .utf8) ?? "")
-            } catch { return (false, String(describing: error)) }
-        }
-        let (ok, text) = run(helper, ["prepare"])
-        let data = text.data(using: .utf8)
-        let result = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        guard ok, let value = result else {
-            if manual { DispatchQueue.main.async { showResult(false, text) } }; return
-        }
-        guard value["status"] as? String == "ready", let stage = value["stage"] as? String else {
-            if manual { DispatchQueue.main.async { showResult(value["status"] as? String == "current", value["message"] as? String ?? text) } }
-            return
-        }
-        DispatchQueue.main.async {
-            // Administrative authorization is always the macOS system password dialog.
-            let command = shellQuote(helper) + " apply " + shellQuote(stage)
-            DispatchQueue.global().async {
-                let (installed, output) = run("/usr/bin/osascript", ["-e", "do shell script \"\(command) 2>&1\" with administrator privileges"])
-                if !installed || manual { DispatchQueue.main.async { showResult(installed, output) } }
-            }
-        }
-    }
-}

@@ -784,6 +784,7 @@ class Service:
             "last_event": last[-1] if last else None,
             "source": util.read_json(paths.SOURCE, None),
             "claude": self.claude_status(),
+            "update": self.update_summary(),
             "proxy_down": self.cfg["proxy_down"],
             "direct": bool(state.get("direct")),
             "direct_block": len(state.get("direct_block") or {}),
@@ -791,6 +792,14 @@ class Service:
         }
         util.write_json(paths.STATUS, status, mode=0o644)
         return status
+
+    @staticmethod
+    def update_summary():
+        try:
+            from . import updater
+            return updater.summary()
+        except Exception:
+            return None
 
     def claude_status(self):
         """The daemon's process view. A CLI command that rewrites status.json has not scanned

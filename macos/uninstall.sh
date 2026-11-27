@@ -20,6 +20,8 @@ fi
 echo "==> 停止受限本地接口"
 launchctl bootout system/com.netguard.control 2>/dev/null || true
 rm -f /Library/LaunchDaemons/com.netguard.control.plist "$ROOT/control.sock"
+launchctl bootout system/com.netguard.updater 2>/dev/null || true
+rm -f /Library/LaunchDaemons/com.netguard.updater.plist
 
 echo "==> 移除断网规则并停止后台"
 if [ -x "$ROOT/bin/netguard-recover" ]; then
