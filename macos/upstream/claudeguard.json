@@ -1,0 +1,6 @@
+{
+  "kind": "source",
+  "version": "61b61e1",
+  "note": "ClaudeGuard v1 installed from source; the updater keeps it. The daily upstream workflow replaces this file through a pull request once a newer release passes NetGuard's compatibility tests.",
+  "verified_at": "2026-11-17"
+}

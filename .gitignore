@@ -26,3 +26,6 @@ dist/
 
 # CI workflows are source, not runtime data.
 !.github/workflows/*.yml
+
+# Verified upstream versions are source, not runtime data.
+!macos/upstream/*.json
