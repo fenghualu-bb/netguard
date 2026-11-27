@@ -23,7 +23,7 @@ CI（GitHub Actions 的一次性 macOS 15 虚拟机）已经验证过 pf 规则�
 | 15 | 局域网 DNS | 查看工作台“局域网 DNS”，以及保护记录里有无“放行局域网 DNS” | 能拦截时显示“拦截”；若显示“放行”，记录里说明了原因，且网页能正常打开 | 未运行 |
 | 16 | 隔离速度 | 进入真实 IP 模式（向导第 1 步），连续打开 Claude 桌面版 3 次 | 每次在 1 秒内被结束；退出向导第 3 步后可正常打开 | 未运行 |
 | 17 | Claude 钩子 | 运行 `ls -l ~/.local/bin/claude`，再看工作台“Claude 钩子” | 指向 ClaudeGuard 的 cli_wrapper.py，工作台显示 ✓ | 未运行 |
-| 18 | 界面更新按钮 | 维护页点“检查并安全更新界面” | 没有新版本时提示“当前没有新版本”；有仅涉及界面的新版本时弹出系统密码框，只替换界面，断网规则和后台不重启；涉及保护组件时提示需完整升级 | 未运行 |
+| 18 | 自动更新 | 维护页“自动更新”点“立即检查…”（密码框），或运行 `sudo /Library/NetGuard/bin/netguard update now` | 已是最新时显示“已是最新”；有 CI 全过的新版本时安装、自检通过并通知；`netguard update status` 显示结果 | 未运行 |
 | 19 | 免密解除锁定 | 锁定状态下在工作台点“解除锁定”；再在终端运行 `/Library/NetGuard/bin/netguard-control release` | 工作台：检查通过才解除，不弹密码框；终端直接运行：被拒绝（“只接受 NetGuard 界面发起的请求”），保持锁定 | 未运行 |
 | 20 | 白名单变更 | 断网保护开启时，在工作台添加一个新 IP；之后把白名单删到只剩一项，再尝试删除这最后一项 | 添加后 10 秒内后台就使用新白名单（无需重启后台）；最后一项拒绝删除 | 未运行 |
 | 21 | 直连模式开启 | 代理正常时在维护页“代理断开时”选“允许直连”（或 `sudo /Library/NetGuard/bin/netguard proxy-down direct`），然后 `sudo /Library/NetGuard/bin/netguard verify` | 显示“断网保护已开启（直连模式）”；verify 全部 ✅，含“Claude 其他地址拦截表”“Claude 主站解析在 Anthropic 网段内”“绑定 en0 访问拦截表中的地址被拒绝” | 未运行 |

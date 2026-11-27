@@ -51,7 +51,7 @@ Windows 版 NetGuard 的 macOS 适配版：给 Claude 用的**断网保护（kil
 - macOS 13 及以上，Apple Silicon 或 Intel（目标机器：M2，macOS 15.x）
 - Xcode Command Line Tools：`xcode-select --install`。它提供 Python 3.9+ 和编译菜单栏程序用的 swiftc，不需要完整的 Xcode
 - **FlClash**，开启 **TUN** 并已授权内核（FlClash 会弹出密码框，把内核改成 root 所有的 setuid 程序），TUN 地址保持默认的 198.18.0.1/16，建议用全局模式，并设为**登录时启动**
-- **ClaudeGuard**：上游 macOS 版（[ivblz/ClaudeGuard](https://github.com/ivblz/ClaudeGuard)，MIT 许可），已加入白名单 IP
+- **ClaudeGuard**：上游 macOS 版（[ivblz/ClaudeGuard](https://github.com/ivblz/ClaudeGuard)；v1 为 MIT 许可，v2 起为 GPL-3.0），已加入白名单 IP
 
 ## 安装（每条 `sudo` 命令都由你本人在“终端”里运行）
 
@@ -70,9 +70,14 @@ Windows 版 NetGuard 的 macOS 适配版：给 Claude 用的**断网保护（kil
 
 **2. ClaudeGuard（上游 macOS 版）**
 
+先看 [`macos/upstream/claudeguard.json`](upstream/claudeguard.json)：这是 NetGuard 已验证兼容的 ClaudeGuard 版本。
+
+- `"kind": "pkg"`：下载其中 `url` 指向的 `ClaudeGuard.pkg`（NetGuard 仓库 Releases 里的镜像，SHA-256 见 `sha256`），双击安装即可。之后 NetGuard 的自动更新会跟随新的已验证版本。
+- `"kind": "source"`（目前是 v1 `61b61e1`）：上游在 2026-11-26 重写了提交历史，这个提交已不在上游分支上，只能按完整提交号取：
+
 ```bash
 git clone https://github.com/ivblz/ClaudeGuard.git ~/ClaudeGuard
-cd ~/ClaudeGuard && git checkout 61b61e1   # 2026-11-08 的版本；升级前先看它的变更
+cd ~/ClaudeGuard && git fetch origin 61b61e11a4e05d86a75213abecceb13d80e8acbf && git checkout FETCH_HEAD
 ./install.sh
 ```
 安装时它会问是否把当前 IP 加入白名单：**只有在代理已连上时**才回答“是”。
@@ -160,22 +165,35 @@ ClaudeGuard 和规则完整性检查保持不变，有一项不通过就保持�
 
 “Claude 退出监控”（ClaudeExitGuard）的识别和清理逻辑已经并入 NetGuard 后台：同一套识别引擎同时负责隔离和退出后清理，由 root 后台执行，不会被普通程序关掉，而且不会出现两个工具重复扫描。确认 NetGuard 新版工作正常（ACCEPTANCE.md 第 24 项）后，可以用 ClaudeExitGuard 自带的 `scripts/uninstall.sh` 卸载它，它的处理记录会保留。两者同时运行也不会互相误杀，只是重复做同一件事。
 
-## 启动时安全自动更新界面（本地新增）
+## 自动更新与上游跟随
 
-菜单栏程序每次启动时自动检查指定仓库的 `main`，不依赖 Codex 定时任务，也不新增定时器或后台服务。
-没有新版本、网络不可用或检查失败时，继续使用当前版本。维护页的“检查并安全更新界面”使用同一流程。
+目标：NetGuard 自己保持最新，并且不会因为 ClaudeGuard、FlClash、Claude 或 macOS 更新而突然不能用。
 
-自动更新范围仅为界面：必须确认目标提交的 macOS 单元测试与真实 pf CI 全部通过，保护文件及配置哈希未变，
-且保护状态正常；以普通用户下载并编译，再通过系统管理员密码框安装。安装前运行完整 `verify`，更新只重启菜单栏，
-不停止守护进程、不重载 pf、不退出 Claude 或浏览器；界面替换/签名失败会还原原界面。
+**NetGuard 自动更新**（root 服务 `com.netguard.updater`，每 6 小时检查一次）
 
-涉及保护代码、安装/启动脚本或 CI 流程的更新会暂缓，显示需要完整审核升级；不会用自动更新覆盖本地解锁修复。
-因此这不是整个保护组件的无人值守升级。保护核心更新仍须按本文件的升级和真机验证流程进行。
-上游尚未合并此功能时，新界面构建会保留本地安全更新入口；入口结构不兼容时暂缓升级。
+- 只安装 [fenghualu-bb/netguard](https://github.com/fenghualu-bb/netguard) `main` 的最新提交，而且要同时满足：它已经是 `main` 最新提交满 24 小时（从这台 Mac 第一次看到它算起），两项 CI（离线测试、真实 pf 集成测试）都在这个提交上通过，并且改动了 macOS 部分（只改 Windows 或文档的提交只记录不安装）。
+- 按提交号下载源码到 root 专属目录，用其中的 `install.sh` 安装，然后自检：新版本在运行、断网规则完整、后台和本地接口都在运行。
+- 自检不通过：自动恢复本次安装前的备份（程序、命令和界面），这个提交记为坏版本、不再重试。安装在改动文件之前就失败时，只重新启动后台，不会回退到更旧的版本。
+- 装好、回滚都会发通知；工作台“维护 → 自动更新”显示最近一次结果，可以关闭或“立即检查”（跳过 24 小时等待，CI 仍须通过）。
+- 命令：`sudo /Library/NetGuard/bin/netguard update status|check|now|enable|disable`；记录在 `/Library/NetGuard/update-state.json`，安装日志在 `/Library/NetGuard/updates/`。
+- 信任边界：能推送到这个仓库 `main` 的人，就能让代码装到这台 Mac 上。请保护好 GitHub 账号（开两步验证）。
 
-策略在 `/Library/NetGuard/gui-update-policy.json`（root 所有），检查结果在
-`~/Library/Application Support/NetGuard/Updates/update-status.json`。这里分别记录保护基线与界面提交，
-工作区原有源码、补丁和验收记录均保留，不自动 `git pull` 或提交文件。
+**ClaudeGuard 跟随已验证版本**
+
+- [`macos/upstream/claudeguard.json`](upstream/claudeguard.json) 记录已验证的版本。每天的 [上游兼容性工作流](../.github/workflows/upstream.yml) 拿 ClaudeGuard 最新发布版的源码跑 NetGuard 的兼容测试；通过后把原版安装包和完整源码（GPL-3.0）镜像到本仓库的 Releases（校验 SHA-256），再开一个更新这个文件的 PR。
+- PR 合并、`main` 的 CI 通过后，Mac 的自动更新会用 `installer` 安装这个版本，并确认它 2 分钟内正常运行；没能正常运行就停止重试并通知你。镜像意味着上游删提交、重写历史都不影响已验证的版本。
+- 目前固定在你在用的 v1（`61b61e1`），所以不会自动换成 v2。v1 → v2 是大版本（GPL-3.0、新增代理模式），合并那个 PR 前请先看它的发布说明。NetGuard 已兼容 v2：它在代理网卡上的放行规则不会再被当成绕过，代理模式会被明确报告为不兼容。
+
+**每天自动核对上游**（GitHub Actions，失败会开 issue，GitHub 会发邮件给你）
+
+| 项目 | 检查内容 |
+|---|---|
+| ClaudeGuard 最新发布 | NetGuard 读取的文件和字段仍在；它的 pf 规则不会被当成绕过；Claude Code 能被识别（原生或经 NetGuard 补丁） |
+| FlClash 最新发布 | 源码里仍有 NetGuard 依赖的内核名、数据目录、TUN 地址和端口配置项 |
+| Anthropic | claude.ai 等主站仍解析在配置的官方网段内，这些网段仍在官方页面上 |
+| 最新 macOS 镜像 | 全部单元测试 |
+
+**运行时适应**：FlClash 更新后内核的 TUN 授权会失效，NetGuard 会明确提示“FlClash 刚从 x 更新到 y，请重新授权”；内核改名、TUN 地址改变、配置里端口为 0（FlClash 0.9.4 起由运行时决定）都能识别或明确指出。
 
 ## 自动断线演练
 

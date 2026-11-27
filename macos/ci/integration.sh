@@ -66,6 +66,10 @@ check "安装前网络可用" net_ok
 section "1. 安装"
 if bash "$MACOS/install.sh" --ci; then ok "install.sh 成功"; else bad "install.sh 失败"; fi
 check "后台已注册" launchctl print system/com.netguard.daemon
+check "自动更新已注册（不在加载时运行）" launchctl print system/com.netguard.updater
+check "自动更新策略已生成" test -f /Library/NetGuard/update-policy.json
+check "普通用户能看自动更新状态" sudo -u "$RUNNER" /Library/NetGuard/bin/netguard update status
+check "旧的界面更新器已移除" test ! -e /Library/NetGuard/bin/netguard-gui-update
 sleep 3
 check "status.json 已生成" test -f "$ROOT/status.json"
 check "NetGuard.app 已编译" test -x /Applications/NetGuard.app/Contents/MacOS/NetGuard
@@ -348,6 +352,7 @@ bash "$ROOT/uninstall.sh" --purge
 check "卸载后没有规则" anchor_empty
 check "卸载后没有文件" test ! -e "$ROOT"
 check "卸载后没有 LaunchDaemon" test ! -e /Library/LaunchDaemons/com.netguard.daemon.plist
+check "卸载后没有自动更新 LaunchDaemon" test ! -e /Library/LaunchDaemons/com.netguard.updater.plist
 check "卸载后没有 App" test ! -e /Applications/NetGuard.app
 
 section "8. 全局不变量"

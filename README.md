@@ -42,7 +42,7 @@
 
 ## 许可
 
-NetGuard 自有代码使用 [MIT 许可](LICENSE)。`patches/claudeguard/` 下的 ClaudeGuard 补丁保留上游 MIT 许可，第三方说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+NetGuard 自有代码使用 [MIT 许可](LICENSE)。`patches/claudeguard/` 下的 ClaudeGuard 补丁基于上游 v1，保留其 MIT 许可（上游 v2 起改为 GPL-3.0），第三方说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 
