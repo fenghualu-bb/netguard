@@ -1,0 +1,183 @@
+name: Upstream compatibility
+
+# Daily check that NetGuard still works with what it depends on. A newer ClaudeGuard release
+# that passes NetGuard's compatibility tests is mirrored into this repository's releases
+# (hash-pinned, with its source) and proposed as a pull request; the Mac's updater installs
+# it only after that pull request is merged and main's CI passes. Any failure opens an issue.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  claudeguard:
+    name: ClaudeGuard latest release
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Latest release and its source
+        id: rel
+        run: |
+          set -euo pipefail
+          gh api repos/ivblz/ClaudeGuard/releases/latest > /tmp/release.json
+          TAG=$(python3 -c "import json; print(json.load(open('/tmp/release.json'))['tag_name'])")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/cg
+          curl -fsSL "https://codeload.github.com/ivblz/ClaudeGuard/tar.gz/refs/tags/$TAG" -o /tmp/cg-source.tar.gz
+          tar -xzf /tmp/cg-source.tar.gz -C /tmp/cg
+          echo "src=$(ls -d /tmp/cg/*/)" >> "$GITHUB_OUTPUT"
+          echo "ClaudeGuard $TAG" >> "$GITHUB_STEP_SUMMARY"
+      - name: NetGuard compatibility tests against that source
+        run: |
+          cd macos && CG_SRC="${{ steps.rel.outputs.src }}" /usr/bin/python3 -m unittest discover -s tests -p 'test_upstream_compat.py' -v
+      - name: Mirror and propose a newer verified version
+        run: |
+          set -euo pipefail
+          VER="${{ steps.rel.outputs.version }}"; TAG="${{ steps.rel.outputs.tag }}"
+          PINNED=$(python3 -c "import json; print(json.load(open('macos/upstream/claudeguard.json'))['version'])")
+          if [ "$PINNED" = "$VER" ]; then echo "Pinned version $VER is current."; exit 0; fi
+          URL=$(python3 -c "import json; print(next(a['browser_download_url'] for a in json.load(open('/tmp/release.json'))['assets'] if a['name'] == 'ClaudeGuard.pkg'))")
+          DIGEST=$(python3 -c "import json; print(next(a.get('digest') or '' for a in json.load(open('/tmp/release.json'))['assets'] if a['name'] == 'ClaudeGuard.pkg'))")
+          curl -fsSL "$URL" -o /tmp/ClaudeGuard.pkg
+          SHA=$(shasum -a 256 /tmp/ClaudeGuard.pkg | cut -d' ' -f1)
+          if [ -n "$DIGEST" ] && [ "$DIGEST" != "sha256:$SHA" ]; then
+            echo "::error::ClaudeGuard.pkg does not match the digest GitHub reports for the release"; exit 1
+          fi
+          pkgutil --check-signature /tmp/ClaudeGuard.pkg || true
+          pkgutil --expand /tmp/ClaudeGuard.pkg /tmp/cg-expanded > /dev/null  # must be a readable package
+          MIRROR="claudeguard-$VER"
+          cp /tmp/cg-source.tar.gz "/tmp/ClaudeGuard-$VER-source.tar.gz"
+          if ! gh release view "$MIRROR" > /dev/null 2>&1; then
+            gh release create "$MIRROR" /tmp/ClaudeGuard.pkg "/tmp/ClaudeGuard-$VER-source.tar.gz" \
+              --title "ClaudeGuard $VER (verified mirror)" --prerelease \
+              --notes "Unmodified ClaudeGuard $TAG from https://github.com/ivblz/ClaudeGuard, mirrored after NetGuard's compatibility tests passed. ClaudeGuard is GPL-3.0; its complete source is attached. ClaudeGuard.pkg SHA-256: $SHA"
+          fi
+          python3 - "$VER" "$SHA" "$MIRROR" "$TAG" <<'PY'
+          import json, sys, datetime
+          ver, sha, mirror, tag = sys.argv[1:5]
+          base = "https://github.com/fenghualu-bb/netguard/releases/download/%s/" % mirror
+          pin = {"kind": "pkg", "version": ver, "url": base + "ClaudeGuard.pkg", "sha256": sha,
+                 "source_url": base + "ClaudeGuard-%s-source.tar.gz" % ver, "upstream_tag": tag,
+                 "verified_at": datetime.date.today().isoformat(),
+                 "note": "Verified by the upstream workflow; installed by the Mac's updater after this file reaches main."}
+          json.dump(pin, open("macos/upstream/claudeguard.json", "w"), indent=2)
+          open("macos/upstream/claudeguard.json", "a").write("\n")
+          PY
+          BRANCH="upstream/claudeguard-$VER"
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then echo "PR branch exists."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add macos/upstream/claudeguard.json
+          git commit -m "macos: ClaudeGuard $VER verified (upstream $TAG)"
+          git push origin "$BRANCH"
+          BODY="ClaudeGuard $TAG passed NetGuard's compatibility tests. The installer and its source are mirrored in release $MIRROR (SHA-256 $SHA). After merging, main's CI runs and the Mac's updater installs it within about a day. ClaudeGuard v1 → v2 is a major change (GPL-3.0, new proxy mode): read its release notes before merging."
+          gh pr create --base main --head "$BRANCH" --title "ClaudeGuard $VER verified" --body "$BODY" || {
+            echo "::warning::Could not open the pull request (Settings → Actions → General → Allow GitHub Actions to create pull requests). Branch $BRANCH is pushed."
+            echo "PR not created: allow GitHub Actions to create pull requests, or open one from branch $BRANCH." >> "$GITHUB_STEP_SUMMARY"
+          }
+
+  flclash:
+    name: FlClash latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Source markers NetGuard relies on
+        run: |
+          set -euo pipefail
+          TAG=$(gh api repos/chen08209/FlClash/releases/latest --jq .tag_name)
+          echo "FlClash $TAG" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/fl && curl -fsSL "https://codeload.github.com/chen08209/FlClash/tar.gz/refs/tags/$TAG" | tar -xz -C /tmp/fl
+          missing=0
+          for marker in FlClashCore com.follow.clash 198.18.0.1 mixed-port; do
+            if grep -rqF --include='*.dart' --include='*.go' --include='*.sh' --include='*.yaml' --include='*.swift' --include='*.plist' "$marker" /tmp/fl; then
+              echo "found: $marker"
+            else
+              echo "::error::FlClash $TAG no longer contains '$marker' (NetGuard depends on it)"; missing=1
+            fi
+          done
+          exit $missing
+
+  anthropic:
+    name: Anthropic addresses
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Main hosts resolve inside the configured ranges; ranges still published
+        run: |
+          python3 - <<'PY'
+          import ipaddress, json, re, subprocess, sys, urllib.request
+          sys.path.insert(0, "macos")
+          from netguard import claude, config
+          nets = [ipaddress.ip_network(n) for n in config.ANTHROPIC_V4 + config.ANTHROPIC_V6]
+          bad = []
+          for host in claude.MAIN_HOSTS:
+              for rtype in ("A", "AAAA"):
+                  req = urllib.request.Request("https://cloudflare-dns.com/dns-query?name=%s&type=%s" % (host, rtype),
+                                               headers={"accept": "application/dns-json"})
+                  answers = json.load(urllib.request.urlopen(req, timeout=15)).get("Answer") or []
+                  for a in answers:
+                      if a.get("type") in (1, 28):
+                          ip = ipaddress.ip_address(a["data"])
+                          if not any(ip.version == n.version and ip in n for n in nets):
+                              bad.append("%s -> %s" % (host, ip))
+          if bad:
+              print("::error::Claude main hosts resolve outside the configured Anthropic ranges: " + ", ".join(bad))
+              sys.exit(1)
+          page = None
+          for url in ("https://docs.claude.com/en/api/ip-addresses", "https://platform.claude.com/docs/en/api/ip-addresses"):
+              try:
+                  page = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "netguard-ci"}), timeout=20).read().decode("utf-8", "replace")
+                  break
+              except Exception as exc:
+                  print("could not fetch %s: %s" % (url, exc))
+          if page is None:
+              print("::warning::Anthropic's IP address page could not be fetched; only DNS was checked")
+              sys.exit(0)
+          listed = set(re.findall(r"[0-9a-fA-F:.]+/[0-9]{1,3}", page))
+          if not listed:
+              print("::warning::Anthropic's IP address page shows no address ranges in its HTML; only DNS was checked")
+              sys.exit(0)
+          missing = [n for n in config.ANTHROPIC_V4 + config.ANTHROPIC_V6 if n not in listed]
+          if missing:
+              print("::error::No longer on Anthropic's IP address page: " + ", ".join(missing))
+              sys.exit(1)
+          print("ranges still published; main hosts inside them")
+          PY
+
+  macos-latest:
+    name: Unit tests on the newest macOS image
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: sw_vers && cd macos && /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
+
+  report:
+    name: Open an issue on failure
+    needs: [claudeguard, flclash, anthropic, macos-latest]
+    if: failure()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          TITLE="上游兼容性检查失败"
+          RUN="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY="每日上游兼容性检查没有通过（ClaudeGuard: ${{ needs.claudeguard.result }}, FlClash: ${{ needs.flclash.result }}, Anthropic: ${{ needs.anthropic.result }}, newest macOS: ${{ needs.macos-latest.result }}）。详情：$RUN 。在修好之前，Mac 上的自动更新不会安装任何没通过 CI 的版本，当前版本继续运行。"
+          NUM=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then gh issue comment "$NUM" --body "$BODY"; else gh issue create --title "$TITLE" --body "$BODY"; fi
